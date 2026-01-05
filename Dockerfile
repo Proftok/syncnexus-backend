@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --production
+RUN npm install --production
 
 # Copy application code
 COPY server.js ./
@@ -21,3 +21,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3   CMD node
 
 # Start server
 CMD ["node", "server.js"]
+
