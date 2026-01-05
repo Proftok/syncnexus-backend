@@ -142,7 +142,7 @@ app.get('/api/members', async (req, res) => {
     const result = await db.query(`
       SELECT 
         member_id as "memberId",
-        whatsapp_member_id as "whatsappMemberId",
+        whatsapp_id as "whatsappMemberId",
         display_name as "displayName",
         phone_number as "phoneNumber",
         company_name as "companyName",
@@ -378,13 +378,13 @@ app.post('/webhook/evolution', async (req, res) => {
 
     // Find or create member
     let member = await db.query(
-      'SELECT member_id FROM crm.wa_members WHERE whatsapp_member_id = $1',
+      'SELECT member_id FROM crm.wa_members WHERE whatsapp_id = $1',
       [senderJid]
     );
 
     if (member.rows.length === 0) {
       const insertMember = await db.query(`
-        INSERT INTO crm.wa_members (whatsapp_member_id, display_name, phone_number)
+        INSERT INTO crm.wa_members (whatsapp_id, display_name, phone_number)
         VALUES ($1, $2, $3)
         RETURNING member_id
       `, [senderJid, data.pushName || 'Unknown', senderJid.split('@')[0]]);
@@ -459,8 +459,9 @@ app.post('/api/sync/groups', async (req, res) => {
     console.log('🔄 Starting group sync...');
 
     const evolutionUrl = process.env.EVOLUTION_API_URL;
-    const apiKey = process.env.EVOLUTION_API_KEY; // Ensure this is set in .env
-    const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
+    const apiKey = process.env.EVOLUTION_API_KEY;
+    // BASED ON USER EVIDENCE: The correct instance name is 'sa-personal'
+    const instanceName = 'sa-personal';
 
     if (!evolutionUrl || !apiKey) {
       throw new Error('Missing EVOLUTION_API_URL or EVOLUTION_API_KEY');
@@ -501,12 +502,12 @@ app.post('/api/sync/groups', async (req, res) => {
               group_description,
               instance_id,
               is_active,
-              total_members
+              participant_count
             ) VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (whatsapp_group_id) DO UPDATE
             SET group_name = EXCLUDED.group_name,
                 group_description = COALESCE(EXCLUDED.group_description, crm.wa_groups.group_description),
-                total_members = EXCLUDED.total_members,
+                participant_count = EXCLUDED.participant_count,
                 updated_at = NOW()
           `, [
           group.id,
