@@ -46,8 +46,8 @@ app.use((req, res, next) => {
 // ============================================
 
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     database: 'connected'
   });
@@ -338,8 +338,8 @@ app.post('/webhook/evolution', async (req, res) => {
     const messageId = data.key.id;
     const groupJid = data.key.remoteJid;
     const senderJid = data.key.participant || data.key.remoteJid;
-    const messageBody = data.message?.conversation || 
-                       data.message?.extendedTextMessage?.text || '';
+    const messageBody = data.message?.conversation ||
+      data.message?.extendedTextMessage?.text || '';
     const timestamp = data.messageTimestamp;
     const fromMe = data.key.fromMe;
 
@@ -447,6 +447,94 @@ cron.schedule('0 0 * * *', async () => {
 cron.schedule('0 6 * * *', async () => {
   console.log('🎂 Running birthday enrichment...');
   // TODO: Implement LinkedIn scraping
+});
+
+// ============================================
+// SYNC ENDPOINTS
+// ============================================
+
+// Sync All Groups from Evolution API
+app.post('/api/sync/groups', async (req, res) => {
+  try {
+    console.log('🔄 Starting group sync...');
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY; // Ensure this is set in .env
+    const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
+
+    if (!evolutionUrl || !apiKey) {
+      throw new Error('Missing EVOLUTION_API_URL or EVOLUTION_API_KEY');
+    }
+
+    // Fetch all groups from Evolution API
+    // Using the v2 endpoint which gives better participant data
+    const response = await axios.get(
+      `${evolutionUrl}/group/fetchAllGroups/${instanceName}?getParticipants=true`,
+      {
+        headers: { 'apikey': apiKey }
+      }
+    );
+
+    const groups = response.data;
+
+    if (!Array.isArray(groups)) {
+      throw new Error("Invalid response from Evolution API: Expected array");
+    }
+
+    console.log(`📡 Fetched ${groups.length} groups from Evolution API.`);
+
+    let syncedCount = 0;
+
+    // Get Instance ID (assuming 1 for SA/Primary for now, or fetch dynamically)
+    // For simplicity, we hardcode 1, but ideally you'd look up process.env.EVOLUTION_INSTANCE_NAME
+    const instanceId = 1;
+
+    // Insert each group into database
+    for (const group of groups) {
+      try {
+        const participantCount = group.participants ? group.participants.length : 0;
+
+        await db.query(`
+            INSERT INTO crm.wa_groups (
+              whatsapp_group_id,
+              group_name,
+              group_description,
+              instance_id,
+              is_active,
+              total_members
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (whatsapp_group_id) DO UPDATE
+            SET group_name = EXCLUDED.group_name,
+                group_description = COALESCE(EXCLUDED.group_description, crm.wa_groups.group_description),
+                total_members = EXCLUDED.total_members,
+                updated_at = NOW()
+          `, [
+          group.id,
+          group.subject || 'Unknown Group',
+          group.desc || group.description || null,
+          instanceId,
+          false, // Default to false monitoring until enabled
+          participantCount
+        ]);
+        syncedCount++;
+      } catch (innerErr) {
+        console.error(`Failed to save group ${group.subject}:`, innerErr.message);
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} groups.`);
+
+    res.json({
+      success: true,
+      totalFetched: groups.length,
+      synced: syncedCount,
+      message: `Successfully synced ${syncedCount} groups`
+    });
+
+  } catch (error) {
+    console.error('❌ Error syncing groups:', error.message);
+    res.status(500).json({ error: error.message, details: error.response?.data });
+  }
 });
 
 // ============================================
