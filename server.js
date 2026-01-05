@@ -343,8 +343,9 @@ app.post('/webhook/evolution', async (req, res) => {
     const timestamp = data.messageTimestamp;
     const fromMe = data.key.fromMe;
 
-    // Skip if from me or empty
-    if (fromMe || !messageBody || messageBody.length < 10) {
+    // Skip only if empty
+    if (!messageBody) {
+      console.log('⏭️  Skipping empty message');
       return res.sendStatus(200);
     }
 
