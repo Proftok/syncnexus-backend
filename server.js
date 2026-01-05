@@ -624,9 +624,9 @@ app.post('/api/sync/groups', async (req, res) => {
     const instanceId = await getOrCreateInstanceId(finalInstanceName);
     if (!instanceId) throw new Error(`Could not find or create instance ID for ${finalInstanceName}`);
 
-    // Fetch all groups from Evolution API
+    // Fetch all groups from Evolution API (Light Mode)
     const response = await axios.get(
-      `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}?getParticipants=true`,
+      `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}`,
       {
         headers: { 'apikey': apiKey }
       }
