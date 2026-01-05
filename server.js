@@ -459,33 +459,124 @@ app.post('/webhook/evolution', async (req, res) => {
 });
 
 // ============================================
-// BACKGROUND JOBS
+// BACKGROUND JOBS (CRON)
 // ============================================
 
-// Daily stats reset (runs at midnight)
-cron.schedule('0 0 * * *', async () => {
-  console.log('🔄 Running daily stats reset...');
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Helper: Backend AI Call
+async function generateBackendCompletion(prompt) {
+  if (!OPENAI_API_KEY) return null;
   try {
-    await db.query(`
-      INSERT INTO crm.wa_system_stats (date)
-      VALUES (CURRENT_DATE)
-      ON CONFLICT (date) DO NOTHING
+    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-5-mini', // Strict user override
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' }
+    }, {
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
+    });
+    return JSON.parse(response.data.choices[0].message.content);
+  } catch (err) {
+    console.error('AI Call Failed:', err.message);
+    return null;
+  }
+}
+
+// Job 1: Daily Stats Reset (Midnight)
+cron.schedule('0 0 * * *', async () => {
+  console.log('🔄 Cron: Resetting daily stats...');
+  await db.query(`INSERT INTO crm.wa_system_stats (date) VALUES (CURRENT_DATE) ON CONFLICT (date) DO NOTHING`);
+});
+
+// Job 2: Daily Executive Enrichment (2 AM)
+// Budget: 2.5m tokens/day. ~800 members. ~3k tokens/member.
+// Strategy: Process batch of 100 stale members per run to distribute load.
+cron.schedule('0 2 * * *', async () => {
+  console.log('💎 Cron: Running Daily Executive Enrichment...');
+
+  try {
+    // 1. Select targets: In monitored groups, active in last 30 days, not enriched in last 7 days
+    const targets = await db.query(`
+      SELECT m.member_id, m.display_name, m.phone_number
+      FROM crm.wa_members m
+      JOIN crm.wa_groups g ON m.group_id = g.group_id
+      WHERE g.monitoring_enabled = true
+      AND m.last_active_at > NOW() - INTERVAL '30 days'
+      AND (m.last_enriched_at IS NULL OR m.last_enriched_at < NOW() - INTERVAL '7 days')
+      LIMIT 50 
     `);
-    console.log('✅ Stats reset complete');
-  } catch (error) {
-    console.error('❌ Stats reset failed:', error);
+
+    if (targets.rows.length === 0) {
+      console.log('✅ No pending enrichments found.');
+      return;
+    }
+
+    console.log(`🚀 Enriching ${targets.rows.length} executives...`);
+
+    for (const member of targets.rows) {
+      // 2. Fetch Context (Last 50 messages)
+      const history = await db.query(`
+        SELECT message_content FROM crm.wa_messages 
+        WHERE sender_id = $1 ORDER BY timestamp DESC LIMIT 50
+      `, [member.member_id]);
+
+      const contextText = history.rows.map(r => r.message_content).join('\n');
+      if (contextText.length < 50) continue; // Skip if too little data
+
+      // 3. AI Analysis
+      const prompt = `
+      ROLE: Elite Executive Analyst.
+      TASK: Profile this individual based on their communication.
+      TARGET: ${member.display_name}
+      CONTEXT: ${contextText.substring(0, 8000)}
+
+      Analyze for:
+      1. Role/Status (CEO, Founder, Investor, Executive?)
+      2. Influence Indicators (YPO, EO, Board Seats, Exits)
+      3. Industry/Sector
+
+      RETURN JSON: { "role": string, "industry": string, "summary": string, "score": number (0-100 Executive Relevance) }
+      `;
+
+      const analysis = await generateBackendCompletion(prompt);
+
+      if (analysis) {
+        // 4. Update DB
+        await db.query(`
+          UPDATE crm.wa_members 
+          SET 
+            job_title = $1,
+            expertise_tags = $2,
+            chat_profile_summary = $3,
+            enrichment_priority = $4,
+            last_enriched_at = NOW()
+          WHERE member_id = $5
+        `, [
+          analysis.role,
+          [analysis.industry], // store as array for tags
+          analysis.summary,
+          analysis.score,
+          member.member_id
+        ]);
+        console.log(`> Enriched: ${member.display_name} (${analysis.role})`);
+      }
+
+      // Rate Limit: 2 seconds pause
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    console.log('✅ Batch Enrichment Complete.');
+
+  } catch (err) {
+    console.error('❌ Enrichment Job Failed:', err.message);
   }
 });
 
-// LinkedIn birthday enrichment (runs at 6 AM)
-cron.schedule('0 6 * * *', async () => {
-  console.log('🎂 Running birthday enrichment...');
-  // TODO: Implement LinkedIn scraping
+// Job 3: LinkedIn Placeholder (Stub)
+// Note: True LinkedIn monitoring requires external scraper API (e.g. Proxycurl/BrightData).
+// For now, we rely on the Executive Enrichment to infer external status.
+cron.schedule('0 5 * * *', async () => {
+  console.log('⚠️ LinkedIn Scraper: Service not configured. Skipping.');
 });
-
-// ============================================
-// SYNC ENDPOINTS
-// ============================================
 
 // Sync All Groups from Evolution API
 app.post('/api/sync/groups', async (req, res) => {
