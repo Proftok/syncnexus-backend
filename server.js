@@ -319,6 +319,29 @@ app.patch('/api/members/:memberId', async (req, res) => {
   }
 });
 
+// Helper: Get or Create Instance ID
+async function getOrCreateInstanceId(evolutionInstanceName) {
+  if (!evolutionInstanceName) return null;
+
+  try {
+    const result = await db.query('SELECT instance_id FROM crm.wa_instances WHERE evolution_instance_id = $1', [evolutionInstanceName]);
+    if (result.rows.length > 0) return result.rows[0].instance_id;
+
+    // Create if not exists
+    console.log(`🆕 Registering new instance: ${evolutionInstanceName}`);
+    const insert = await db.query(`
+      INSERT INTO crm.wa_instances (instance_name, evolution_instance_id, is_active, is_primary)
+      VALUES ($1, $1, true, false)
+      RETURNING instance_id
+    `, [evolutionInstanceName]);
+
+    return insert.rows[0].instance_id;
+  } catch (err) {
+    console.error(`Error getting instance ID for ${evolutionInstanceName}:`, err.message);
+    return null;
+  }
+}
+
 // ============================================
 // EVOLUTION API WEBHOOK HANDLER
 // ============================================
@@ -327,7 +350,7 @@ app.post('/webhook/evolution', async (req, res) => {
   try {
     const { event, instance, data } = req.body;
 
-    console.log('📨 Webhook received:', event, instance);
+    // console.log('📨 Webhook received:', event, instance);
 
     // Only process new messages
     if (event !== 'messages.upsert') {
@@ -341,13 +364,12 @@ app.post('/webhook/evolution', async (req, res) => {
     const messageBody = data.message?.conversation ||
       data.message?.extendedTextMessage?.text || '';
     const timestamp = new Date(data.messageTimestamp * 1000);
-    const fromMe = data.key.fromMe;
 
-    // Skip only if empty
-    if (!messageBody) {
-      console.log('⏭️  Skipping empty message');
-      return res.sendStatus(200);
-    }
+    // Skip if empty
+    if (!messageBody) return res.sendStatus(200);
+
+    // Get Instance ID
+    const instanceId = await getOrCreateInstanceId(instance);
 
     // Check if message already exists (deduplication)
     const existing = await db.query(
@@ -355,10 +377,7 @@ app.post('/webhook/evolution', async (req, res) => {
       [messageId]
     );
 
-    if (existing.rows.length > 0) {
-      console.log('⏭️  Message already processed');
-      return res.sendStatus(200);
-    }
+    if (existing.rows.length > 0) return res.sendStatus(200);
 
     // Find or create group
     let group = await db.query(
@@ -367,11 +386,12 @@ app.post('/webhook/evolution', async (req, res) => {
     );
 
     if (group.rows.length === 0) {
+      if (!instanceId) console.warn(`⚠️ Creating group ${groupJid} without instance ID`);
       const insertGroup = await db.query(`
-        INSERT INTO crm.wa_groups (whatsapp_group_id, group_name, is_active)
-        VALUES ($1, $2, true)
+        INSERT INTO crm.wa_groups (whatsapp_group_id, group_name, is_active, instance_id)
+        VALUES ($1, $2, true, $3)
         RETURNING group_id
-      `, [groupJid, 'Unknown Group']);
+      `, [groupJid, 'Unknown Group', instanceId]);
       group = insertGroup;
     }
 
@@ -404,13 +424,6 @@ app.post('/webhook/evolution', async (req, res) => {
       RETURNING message_id
     `, [messageId, groupId, memberId, messageBody, timestamp]);
 
-    const savedMessageId = messageResult.rows[0].message_id;
-
-    console.log('✅ Message saved to database');
-
-    // TODO: Trigger AI analysis here
-    // analyzeMessage(savedMessageId);
-
     // Update system stats
     await db.query(`
       UPDATE crm.wa_system_stats
@@ -420,7 +433,7 @@ app.post('/webhook/evolution', async (req, res) => {
 
     res.sendStatus(200);
   } catch (error) {
-    console.error('❌ Webhook error:', error);
+    console.error('❌ Webhook error:', error.message);
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
@@ -457,21 +470,25 @@ cron.schedule('0 6 * * *', async () => {
 // Sync All Groups from Evolution API
 app.post('/api/sync/groups', async (req, res) => {
   try {
-    console.log('🔄 Starting group sync...');
+    const { instanceName } = req.body; // Accept dynamic instance name
+    const finalInstanceName = instanceName || 'sa-personal'; // Default Fallback
+
+    console.log(`🔄 Starting group sync for ${finalInstanceName}...`);
 
     const evolutionUrl = process.env.EVOLUTION_API_URL;
     const apiKey = process.env.EVOLUTION_API_KEY;
-    // BASED ON USER EVIDENCE: The correct instance name is 'sa-personal'
-    const instanceName = 'sa-personal';
 
     if (!evolutionUrl || !apiKey) {
       throw new Error('Missing EVOLUTION_API_URL or EVOLUTION_API_KEY');
     }
 
+    // Ensure instance exists in DB
+    const instanceId = await getOrCreateInstanceId(finalInstanceName);
+    if (!instanceId) throw new Error(`Could not find or create instance ID for ${finalInstanceName}`);
+
     // Fetch all groups from Evolution API
-    // Using the v2 endpoint which gives better participant data
     const response = await axios.get(
-      `${evolutionUrl}/group/fetchAllGroups/${instanceName}?getParticipants=true`,
+      `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}?getParticipants=true`,
       {
         headers: { 'apikey': apiKey }
       }
@@ -479,43 +496,33 @@ app.post('/api/sync/groups', async (req, res) => {
 
     const groups = response.data;
 
-    if (!Array.isArray(groups)) {
-      throw new Error("Invalid response from Evolution API: Expected array");
-    }
+    if (!Array.isArray(groups)) throw new Error("Invalid response from Evolution API");
 
-    console.log(`📡 Fetched ${groups.length} groups from Evolution API.`);
+    console.log(`📡 Fetched ${groups.length} groups.`);
 
     let syncedCount = 0;
 
-    // Get Instance ID (assuming 1 for SA/Primary for now, or fetch dynamically)
-    // For simplicity, we hardcode 1, but ideally you'd look up process.env.EVOLUTION_INSTANCE_NAME
-    const instanceId = 1;
-
-    // Insert each group into database
+    // Insert each group
     for (const group of groups) {
       try {
         const participantCount = group.participants ? group.participants.length : 0;
 
         await db.query(`
             INSERT INTO crm.wa_groups (
-              whatsapp_group_id,
-              group_name,
-              group_description,
-              instance_id,
-              is_active,
-              participant_count
+              whatsapp_group_id, group_name, group_description, instance_id, is_active, participant_count
             ) VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (whatsapp_group_id) DO UPDATE
             SET group_name = EXCLUDED.group_name,
                 group_description = COALESCE(EXCLUDED.group_description, crm.wa_groups.group_description),
                 participant_count = EXCLUDED.participant_count,
+                instance_id = EXCLUDED.instance_id, -- Update instance binding if needed
                 updated_at = NOW()
           `, [
           group.id,
           group.subject || 'Unknown Group',
           group.desc || group.description || null,
           instanceId,
-          false, // Default to false monitoring until enabled
+          false,
           participantCount
         ]);
         syncedCount++;
@@ -524,18 +531,11 @@ app.post('/api/sync/groups', async (req, res) => {
       }
     }
 
-    console.log(`✅ Synced ${syncedCount} groups.`);
-
-    res.json({
-      success: true,
-      totalFetched: groups.length,
-      synced: syncedCount,
-      message: `Successfully synced ${syncedCount} groups`
-    });
+    res.json({ success: true, totalFetched: groups.length, synced: syncedCount });
 
   } catch (error) {
     console.error('❌ Error syncing groups:', error.message);
-    res.status(500).json({ error: error.message, details: error.response?.data });
+    res.status(500).json({ error: error.message });
   }
 });
 
