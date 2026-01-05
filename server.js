@@ -291,7 +291,7 @@ app.get('/api/social/linkedin/recent-posts', async (req, res) => {
   }
 });
 
-// Update Group Settings
+// Update Group Settings (By ID)
 app.patch('/api/groups/:groupId', async (req, res) => {
   try {
     const { groupId } = req.params;
@@ -312,6 +312,33 @@ app.patch('/api/groups/:groupId', async (req, res) => {
   } catch (error) {
     console.error('Error updating group:', error);
     res.status(500).json({ error: 'Failed to update group' });
+  }
+});
+
+// Upsert Group (By JID - Used by Frontend Selection)
+app.post('/api/groups/upsert', async (req, res) => {
+  try {
+    const { jid, name, memberCount, monitoringEnabled, instanceId } = req.body;
+
+    // Ensure instanceId is valid or default
+    const validInstanceId = instanceId || 1;
+
+    const result = await db.query(`
+      INSERT INTO crm.wa_groups (whatsapp_group_id, group_name, participant_count, monitoring_enabled, instance_id, is_active)
+      VALUES ($1, $2, $3, $4, $5, true)
+      ON CONFLICT (whatsapp_group_id) DO UPDATE
+      SET 
+        group_name = EXCLUDED.group_name,
+        monitoring_enabled = EXCLUDED.monitoring_enabled,
+        participant_count = EXCLUDED.participant_count,
+        updated_at = NOW()
+      RETURNING *
+    `, [jid, name, memberCount || 0, monitoringEnabled || false, validInstanceId]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error upserting group:', error);
+    res.status(500).json({ error: 'Failed to upsert group' });
   }
 });
 
