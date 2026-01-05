@@ -340,7 +340,7 @@ app.post('/webhook/evolution', async (req, res) => {
     const senderJid = data.key.participant || data.key.remoteJid;
     const messageBody = data.message?.conversation ||
       data.message?.extendedTextMessage?.text || '';
-    const timestamp = data.messageTimestamp;
+    const timestamp = new Date(data.messageTimestamp * 1000);
     const fromMe = data.key.fromMe;
 
     // Skip only if empty
