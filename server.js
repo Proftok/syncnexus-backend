@@ -185,7 +185,7 @@ app.get('/api/inbox/high-value', async (req, res) => {
         mem.eo_chapter as "senderEoChapter",
         g.group_name as "groupName",
         g.whatsapp_group_id as "groupJid",
-        m.message_body as "messageBody",
+        m.message_content as "messageBody",
         a.value_score as "valueScore",
         a.intent_category as "intentCategory",
         a.reasoning,
@@ -397,11 +397,11 @@ app.post('/webhook/evolution', async (req, res) => {
     const messageResult = await db.query(`
       INSERT INTO crm.wa_messages (
         whatsapp_message_id, group_id, sender_id, 
-        message_type, message_body, is_from_me, timestamp
+        message_type, message_content, timestamp
       )
-      VALUES ($1, $2, $3, 'text', $4, $5, $6)
+      VALUES ($1, $2, $3, 'text', $4, $5)
       RETURNING message_id
-    `, [messageId, groupId, memberId, messageBody, fromMe, timestamp]);
+    `, [messageId, groupId, memberId, messageBody, timestamp]);
 
     const savedMessageId = messageResult.rows[0].message_id;
 
