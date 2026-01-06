@@ -261,17 +261,24 @@ router.post('/messages', async (req, res) => {
     const groupId = groupRes.rows[0].group_id;
 
     // Query Evolution's Message table
-    const evolutionMessages = await db.query(`
-      SELECT 
-        key,
-        message,
-        "messageTimestamp",
-        "pushName"
-      FROM evolution_api."Message"
-      WHERE (key->>'remoteJid') = $1
-      ORDER BY "messageTimestamp" DESC
-      LIMIT $2
-    `, [groupJid, messageLimit]);
+    // Get offset from request (for pagination)
+const offset = req.body.offset || 0;
+
+const evolutionMessages = await db.query(`
+  SELECT 
+    key,
+    message,
+    "messageTimestamp",
+    "pushName"
+  FROM evolution_api."Message"
+  WHERE (key->>'remoteJid') = $1
+  ORDER BY "messageTimestamp" DESC
+  OFFSET $2
+  LIMIT $3
+`, [groupJid, offset, messageLimit]);
+
+console.log(`📦 Fetching messages with offset ${offset}, limit ${messageLimit}...`);
+
 
     console.log(`📦 Found ${evolutionMessages.rows.length} messages in Evolution database`);
 
