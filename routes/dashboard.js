@@ -86,7 +86,7 @@ router.get('/groups/:jid/messages', async (req, res) => {
     try {
         const { jid } = req.params;
         const result = await db.query(`
-            SELECT m.message_id as "id", m.message_content as "body", m.created_at_ts as "timestamp", 
+            SELECT m.message_id as "id", m.message_content as "body", m.created_at as "timestamp", 
                    mem.display_name as "sender_name", mem.member_id as "sender_id", mem.whatsapp_id as "sender_jid"
             FROM crm.wa_messages m
             JOIN crm.wa_groups g ON m.group_id = g.group_id

@@ -7,15 +7,20 @@ const db = require('../config/db');
 async function getOrCreateInstanceId(evolutionInstanceName) {
     if (!evolutionInstanceName) return null;
     try {
-        const result = await db.query('SELECT instance_id FROM crm.wa_instances WHERE evolution_instance_id = $1', [evolutionInstanceName]);
+        const result = await db.query(
+            'SELECT instance_id FROM crm.wa_instances WHERE evolution_instance_id = $1',
+            [evolutionInstanceName]
+        );
+
         if (result.rows.length > 0) return result.rows[0].instance_id;
 
         console.log(`🆕 Registering new instance: ${evolutionInstanceName}`);
         const insert = await db.query(`
-        INSERT INTO crm.wa_instances (instance_name, evolution_instance_id, is_active, is_primary)
-        VALUES ($1, $1, true, false)
-        RETURNING instance_id
-      `, [evolutionInstanceName]);
+      INSERT INTO crm.wa_instances (instance_name, evolution_instance_id, is_active, is_primary)
+      VALUES ($1, $1, true, false)
+      RETURNING instance_id
+    `, [evolutionInstanceName]);
+
         return insert.rows[0].instance_id;
     } catch (err) {
         console.error(`Error getting instance ID for ${evolutionInstanceName}:`, err.message);
@@ -210,11 +215,11 @@ router.post('/full-sync', async (req, res) => {
 
                         // Insert Link
                         await db.query(`
-                            INSERT INTO crm.wa_groupmembers (group_id, member_id, is_admin)
-                            SELECT g.group_id, m.member_id, $3
-                            FROM crm.wa_groups g, crm.wa_members m
-                            WHERE g.whatsapp_group_id = $1 AND m.whatsapp_id = $2
-                            ON CONFLICT DO NOTHING
+                          INSERT INTO crm.wa_groupmembers (group_id, member_id, is_admin)
+                          SELECT g.group_id, m.member_id, $3
+                          FROM crm.wa_groups g, crm.wa_members m
+                          WHERE g.whatsapp_group_id = $1 AND m.whatsapp_id = $2
+                          ON CONFLICT (group_id, member_id) DO NOTHING
                         `, [jid, waId, p.admin === 'admin']);
                     }
 

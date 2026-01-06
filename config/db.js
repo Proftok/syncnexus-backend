@@ -3,11 +3,13 @@ require('dotenv').config();
 
 const db = new Pool({
     host: process.env.DB_HOST || 'postgres',
-    port: process.env.DB_PORT || 5432,
+    port: parseInt(process.env.DB_PORT) || 5432,
     database: process.env.DB_NAME || 'postgres',
     user: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD,
-    searchPath: ['crm'] // Ensure 'crm' schema is default
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
 });
 
 db.connect((err, client, release) => {
@@ -17,6 +19,15 @@ db.connect((err, client, release) => {
         console.log('✅ Database connected');
         release();
     }
+});
+
+// Set default schema
+db.on('connect', (client) => {
+    client.query('SET search_path TO crm, public');
+});
+
+db.on('error', (err) => {
+    console.error('Unexpected database error:', err);
 });
 
 module.exports = db;
