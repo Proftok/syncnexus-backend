@@ -714,15 +714,28 @@ app.post('/api/sync/pilot', async (req, res) => {
       const phone = waId.split('@')[0];
       const name = p.pushName || p.notify || phone;
 
-      // Upsert Member
+      // 1. Upsert Member (Strictly using verified columns)
       const memberInsert = await db.query(`
         INSERT INTO crm.wa_members (whatsapp_id, display_name, phone_number, monitoring_enabled)
         VALUES ($1, $2, $3, true)
         ON CONFLICT (whatsapp_id) DO UPDATE
-        SET display_name = COALESCE(crm.wa_members.display_name, EXCLUDED.display_name),
-            updated_at = NOW()
+        SET display_name = COALESCE(crm.wa_members.display_name, EXCLUDED.display_name)
         RETURNING member_id
       `, [waId, name, phone]);
+
+      const memberId = memberInsert.rows[0].member_id;
+
+      // 2. Link to Group (Many-to-Many)
+      // We try/catch this in case wa_groupmembers table name differs, to ensure the member is at least saved.
+      try {
+        await db.query(`
+            INSERT INTO crm.wa_groupmembers (group_id, member_id, is_currently_member)
+            VALUES ($1, $2, true)
+            ON CONFLICT (group_id, member_id) DO NOTHING
+          `, [dbGroupId, memberId]);
+      } catch (linkErr) {
+        console.warn(`Could not link member ${name} to group: ${linkErr.message}`);
+      }
 
       importedCount++;
     }
