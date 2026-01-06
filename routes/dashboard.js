@@ -83,24 +83,31 @@ router.get('/inbox/high-value', async (req, res) => {
 
 // GET MESSAGES BY GROUP (History)
 router.get('/groups/:jid/messages', async (req, res) => {
-    try {
-        const { jid } = req.params;
-        const result = await db.query(`
-            SELECT m.message_id as "id", m.message_content as "body", m.created_at as "timestamp", 
-                   mem.display_name as "sender_name", mem.member_id as "sender_id", mem.whatsapp_id as "sender_jid"
-            FROM crm.wa_messages m
-            JOIN crm.wa_groups g ON m.group_id = g.group_id
-            LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
-            WHERE g.whatsapp_group_id = $1
-            ORDER BY m.created_at DESC
-            LIMIT 50
-        `, [jid]);
-        res.json(result.rows);
-    } catch (error) {
-        console.error('Error fetching messages:', error);
-        res.status(500).json({ error: 'Failed' });
-    }
+  try {
+    const { jid } = req.params;
+    const result = await db.query(`
+      SELECT 
+        m.message_id as "id", 
+        m.message_content as "body", 
+        m.timestamp as "timestamp",
+        mem.display_name as "sender_name", 
+        mem.member_id as "sender_id", 
+        mem.whatsapp_id as "sender_jid"
+      FROM crm.wa_messages m
+      JOIN crm.wa_groups g ON m.group_id = g.group_id
+      LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
+      WHERE g.whatsapp_group_id = $1
+      ORDER BY m.timestamp DESC
+      LIMIT 50
+    `, [jid]);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Failed' });
+  }
 });
+
 
 // UPSERT GROUP SETTINGS
 router.post('/groups/upsert', async (req, res) => {
