@@ -240,7 +240,7 @@ router.post('/full-sync', async (req, res) => {
     }
 });
 
-// 3. SYNC MESSAGES (Fixed Column Names for Evolution v2)
+// 3. SYNC MESSAGES (Evolution Database - Fixed)
 router.post('/messages', async (req, res) => {
   try {
     const { groupJid, limit } = req.body;
@@ -260,13 +260,13 @@ router.post('/messages', async (req, res) => {
 
     const groupId = groupRes.rows[0].group_id;
 
-    // Query Evolution's Message table with correct column structure
+    // Query Evolution's Message table
     const evolutionMessages = await db.query(`
       SELECT 
         key,
         message,
         "messageTimestamp",
-        "pushName",
+        "pushName"
       FROM evolution_api."Message"
       WHERE (key->>'remoteJid') = $1
       ORDER BY "messageTimestamp" DESC
@@ -318,13 +318,13 @@ router.post('/messages', async (req, res) => {
           body = '[Media/System]';
         }
 
-        // Skip very short or empty messages
+        // Skip empty messages
         if (!body || body.length < 2) {
           skippedCount++;
           continue;
         }
 
-        // Ensure sender exists in our members table
+        // Ensure sender exists
         await db.query(`
           INSERT INTO crm.wa_members (whatsapp_id, display_name)
           VALUES ($1, $2)
@@ -339,7 +339,6 @@ router.post('/messages', async (req, res) => {
         );
 
         if (memberRes.rows.length === 0) {
-          console.warn(`Member not found for ${senderJid}`);
           skippedCount++;
           continue;
         }
@@ -347,14 +346,14 @@ router.post('/messages', async (req, res) => {
         const memberId = memberRes.rows[0].member_id;
 
         // Determine media type
-        const hasMedia = message?.imageMessage || message?.videoMessage || message?.audioMessage || message?.documentMessage;
+        const hasMedia = !!(message?.imageMessage || message?.videoMessage || message?.audioMessage || message?.documentMessage);
         let mediaType = 'text';
         if (message?.imageMessage) mediaType = 'image';
         else if (message?.videoMessage) mediaType = 'video';
         else if (message?.audioMessage) mediaType = 'audio';
         else if (message?.documentMessage) mediaType = 'document';
 
-        // Insert into our messages table
+        // Insert message
         const insertResult = await db.query(`
           INSERT INTO crm.wa_messages (
             whatsapp_message_id, group_id, sender_id, message_content,
@@ -368,7 +367,7 @@ router.post('/messages', async (req, res) => {
           memberId,
           body,
           timestamp,
-          hasMedia ? true : false,
+          hasMedia,
           mediaType,
           isFromMe
         ]);
@@ -376,7 +375,7 @@ router.post('/messages', async (req, res) => {
         if (insertResult.rowCount > 0) {
           savedCount++;
         } else {
-          skippedCount++; // Duplicate
+          skippedCount++;
         }
 
       } catch (msgError) {
@@ -396,11 +395,10 @@ router.post('/messages', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Message sync error:', error.message);
+    console.error('Stack:', error.stack);
     res.status(500).json({ error: error.message });
   }
 });
 
 
-
 module.exports = router;
-
