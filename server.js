@@ -716,14 +716,13 @@ app.post('/api/sync/pilot', async (req, res) => {
 
       // Upsert Member
       const memberInsert = await db.query(`
-        INSERT INTO crm.wa_members (whatsapp_id, display_name, phone_number, group_id, monitoring_enabled)
-        VALUES ($1, $2, $3, $4, true)
+        INSERT INTO crm.wa_members (whatsapp_id, display_name, phone_number, monitoring_enabled)
+        VALUES ($1, $2, $3, true)
         ON CONFLICT (whatsapp_id) DO UPDATE
-        SET group_id = EXCLUDED.group_id, -- Note: This overwrites previous group assignment (Schema Limitation)
-            display_name = COALESCE(crm.wa_members.display_name, EXCLUDED.display_name),
+        SET display_name = COALESCE(crm.wa_members.display_name, EXCLUDED.display_name),
             updated_at = NOW()
         RETURNING member_id
-      `, [waId, name, phone, dbGroupId]);
+      `, [waId, name, phone]);
 
       importedCount++;
     }
