@@ -44,6 +44,7 @@ app.get('/health', (req, res) => {
 // ROUTES
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/webhook', require('./routes/webhook')); // <-- NEW: Real-time Listener
 app.use('/api/dashboard', require('./routes/dashboard')); // Includes /stats
 app.use('/api', require('./routes/dashboard')); // For /members, /groups fallback to root /api if needed or move to /api/data
 
