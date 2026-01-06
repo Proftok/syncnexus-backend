@@ -605,46 +605,36 @@ cron.schedule('0 5 * * *', async () => {
   console.log('⚠️ LinkedIn Scraper: Service not configured. Skipping.');
 });
 
-// Sync All Groups from Evolution API
+// Sync All Groups from Evolution API (Light Mode)
 app.post('/api/sync/groups', async (req, res) => {
   try {
-    const { instanceName } = req.body; // Accept dynamic instance name
-    const finalInstanceName = instanceName || 'sa-personal'; // Default Fallback
+    const { instanceName } = req.body;
+    const finalInstanceName = instanceName || 'sa-personal';
 
-    console.log(`🔄 Starting group sync for ${finalInstanceName}...`);
+    console.log(`🔄 Starting group sync (Metadata Only) for ${finalInstanceName}...`);
 
     const evolutionUrl = process.env.EVOLUTION_API_URL;
     const apiKey = process.env.EVOLUTION_API_KEY;
 
-    if (!evolutionUrl || !apiKey) {
-      throw new Error('Missing EVOLUTION_API_URL or EVOLUTION_API_KEY');
-    }
+    if (!evolutionUrl || !apiKey) throw new Error('Missing EVOLUTION_API_URL or EVOLUTION_API_KEY');
 
-    // Ensure instance exists in DB
     const instanceId = await getOrCreateInstanceId(finalInstanceName);
     if (!instanceId) throw new Error(`Could not find or create instance ID for ${finalInstanceName}`);
 
-    // Fetch all groups from Evolution API (Light Mode)
+    // CRITICAL FIX: getParticipants=false to prevent timeout
     const response = await axios.get(
-      `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}`,
-      {
-        headers: { 'apikey': apiKey }
-      }
+      `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}?getParticipants=false`,
+      { headers: { 'apikey': apiKey } }
     );
 
     const groups = response.data;
-
     if (!Array.isArray(groups)) throw new Error("Invalid response from Evolution API");
 
     console.log(`📡 Fetched ${groups.length} groups.`);
 
     let syncedCount = 0;
-
-    // Insert each group
     for (const group of groups) {
       try {
-        const participantCount = group.participants ? group.participants.length : 0;
-
         await db.query(`
             INSERT INTO crm.wa_groups (
               whatsapp_group_id, group_name, group_description, instance_id, is_active, participant_count
@@ -652,16 +642,14 @@ app.post('/api/sync/groups', async (req, res) => {
             ON CONFLICT (whatsapp_group_id) DO UPDATE
             SET group_name = EXCLUDED.group_name,
                 group_description = COALESCE(EXCLUDED.group_description, crm.wa_groups.group_description),
-                participant_count = EXCLUDED.participant_count,
-                instance_id = EXCLUDED.instance_id, -- Update instance binding if needed
                 updated_at = NOW()
           `, [
           group.id,
           group.subject || 'Unknown Group',
           group.desc || group.description || null,
           instanceId,
-          false,
-          participantCount
+          true, // Active
+          group.size || 0
         ]);
         syncedCount++;
       } catch (innerErr) {
@@ -673,6 +661,68 @@ app.post('/api/sync/groups', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error syncing groups:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PILOT ENDPOINT: Sync & Enrich Specific Group (CEO Coffee Club)
+app.post('/api/sync/pilot', async (req, res) => {
+  try {
+    const { groupJid, instanceName } = req.body;
+    const finalInstanceName = instanceName || 'sa-personal';
+
+    console.log(`🎯 PILOT SYNC: Fetching members for ${groupJid}...`);
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY;
+    const instanceId = await getOrCreateInstanceId(finalInstanceName);
+
+    // Get DB Group ID first
+    const groupResult = await db.query('SELECT group_id FROM crm.wa_groups WHERE whatsapp_group_id = $1', [groupJid]);
+    if (groupResult.rows.length === 0) throw new Error('Group not found in DB. Run /api/sync/groups first.');
+    const dbGroupId = groupResult.rows[0].group_id;
+
+    // Fetch Participants from Evolution
+    const response = await axios.get(
+      `${evolutionUrl}/group/participants/${finalInstanceName}?groupJid=${groupJid}`,
+      { headers: { 'apikey': apiKey } }
+    );
+
+    const participants = response.data;
+    // Handle Evolution API variations (data vs array)
+    const membersList = participants.data || participants;
+
+    if (!Array.isArray(membersList)) throw new Error('Invalid participants response');
+
+    console.log(`👥 Found ${membersList.length} participants.`);
+
+    let importedCount = 0;
+    for (const p of membersList) {
+      const waId = p.id;
+      const phone = waId.split('@')[0];
+      const name = p.pushName || p.notify || phone;
+
+      // Upsert Member
+      const memberInsert = await db.query(`
+        INSERT INTO crm.wa_members (whatsapp_id, display_name, phone_number, group_id, monitoring_enabled)
+        VALUES ($1, $2, $3, $4, true)
+        ON CONFLICT (whatsapp_id) DO UPDATE
+        SET group_id = EXCLUDED.group_id, -- Note: This overwrites previous group assignment (Schema Limitation)
+            display_name = COALESCE(crm.wa_members.display_name, EXCLUDED.display_name),
+            updated_at = NOW()
+        RETURNING member_id
+      `, [waId, name, phone, dbGroupId]);
+
+      importedCount++;
+    }
+
+    // Enable Monitoring for this group
+    await db.query('UPDATE crm.wa_groups SET monitoring_enabled = true WHERE group_id = $1', [dbGroupId]);
+
+    res.json({ success: true, group: groupJid, imported: importedCount });
+
+  } catch (error) {
+    console.error('❌ Pilot Sync Failed:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
