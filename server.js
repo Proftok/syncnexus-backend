@@ -891,23 +891,24 @@ app.post('/api/sync/group-names', async (req, res) => {
     const { groupJid, instanceName } = req.body;
     const finalInstanceName = instanceName || 'sa-personal';
 
-    console.log(`🚑 GROUP NAME RESCUE: Scanning participants of ${groupJid} (Refresh=True)...`);
+    console.log(`🚑 GROUP NAME RESCUE: Scanning participants of ${groupJid} via findGroupInfos...`);
 
     const evolutionUrl = process.env.EVOLUTION_API_URL;
     const apiKey = process.env.EVOLUTION_API_KEY;
 
-    // Fetch Group Participants WITH refresh=true to force latest metadata
+    // STRATEGY CHANGE: Use findGroupInfos which contains richer metadata (pushName)
+    // and standard JIDs compared to the raw participants list which might return LIDs.
     const response = await axios.get(
-      `${evolutionUrl}/group/participants/${finalInstanceName}?groupJid=${groupJid}&refresh=true`,
+      `${evolutionUrl}/group/findGroupInfos/${finalInstanceName}?groupJid=${groupJid}`,
       { headers: { 'apikey': apiKey } }
     );
 
-    const participants = response.data;
-    let membersList = Array.isArray(participants) ? participants : (participants.data || participants.participants || []);
+    const groupInfo = response.data;
+    const membersList = groupInfo.participants || [];
 
     if (!membersList || membersList.length === 0) throw new Error("No participants found.");
 
-    // DEBUG: Log first member to see structure
+    // DEBUG: Log first member
     if (membersList.length > 0) {
       console.log('DEBUG First Participant:', JSON.stringify(membersList[0], null, 2));
     }
@@ -916,10 +917,28 @@ app.post('/api/sync/group-names', async (req, res) => {
     const debugSkipped = [];
 
     for (const p of membersList) {
-      const waId = p.id;
-      const rawName = p.pushName || p.notify; // The "~Name"
+      // HANDLE ID MISMATCH:
+      // The API might return 'id' as an object { _serialized: '...' } or a string.
+      // It might also return LIDs. We strictly want the Phone JID (@s.whatsapp.net).
 
-      if (!rawName) continue;
+      let waId = null;
+
+      if (typeof p.id === 'string') {
+        waId = p.id;
+      } else if (p.id && p.id._serialized) {
+        waId = p.id._serialized;
+      }
+
+      // If it's an LID (starts with high numbers usually, ends in @lid)
+      // We try to construct the Phone JID if 'id' is LID but we have a number?
+      // Actually, findGroupInfos usually returns the correct JID in `id._serialized`.
+
+      // Fallback: If we have an LID, but good pushName, we need to map it. 
+      // For now, let's assume findGroupInfos gives us the standard JID.
+
+      const rawName = p.pushName || p.notify || p.name; // extended search for name keys
+
+      if (!waId || !rawName) continue;
 
       // Enhanced Logic: Overwrite if NULL, ID, Phone-like, OR 'Unknown'
       const result = await db.query(`
@@ -938,13 +957,12 @@ app.post('/api/sync/group-names', async (req, res) => {
       if (result.rowCount > 0) {
         updatedCount++;
       } else if (debugSkipped.length < 5) {
-        // Capture why we skipped this one (for the user to see in PowerShell)
         const currentDb = await db.query('SELECT display_name FROM crm.wa_members WHERE whatsapp_id = $1', [waId]);
         debugSkipped.push({
           waId,
           pushName: rawName,
-          currentDbValue: currentDb.rows[0]?.display_name || 'NULL',
-          reason: !rawName ? 'No PushName' : 'DB refused update'
+          currentDbValue: currentDb.rows[0]?.display_name || 'NOT_FOUND_IN_DB',
+          reason: 'DB refused update or ID mismatch'
         });
       }
     }
@@ -955,7 +973,7 @@ app.post('/api/sync/group-names', async (req, res) => {
       fixed: updatedCount,
       totalScanned: membersList.length,
       debug_skipped_samples: debugSkipped,
-      sample_record: membersList.length > 0 ? membersList[0] : null // critical for debugging
+      sample_record: membersList.length > 0 ? membersList[0] : null
     });
 
   } catch (error) {
