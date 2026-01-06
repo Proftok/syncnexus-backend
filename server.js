@@ -4,6 +4,8 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const axios = require('axios');
 const cron = require('node-cron');
+const fs = require('fs');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -967,11 +969,67 @@ app.post('/api/sync/group-names', async (req, res) => {
       }
     }
 
-    console.log(`✅ Fixed ~Names for ${updatedCount} strangers.`);
+    // PART 2: HISTORY HARVEST (New Strategy)
+    // Since direct member fetch often misses pushName for strangers,
+    // we scan the Chat History. "Active Strangers" will have their pushName on their messages.
+
+    console.log(`📜 HISTORY HARVEST: Scanning last 100 messages for active participant names...`);
+
+    try {
+      const historyResponse = await axios.post(
+        `${evolutionUrl}/chat/fetchMessages/${finalInstanceName}`,
+        {
+          "messagesLimit": 100,
+          "chatId": groupJid
+        },
+        { headers: { 'apikey': apiKey } }
+      );
+
+      const messages = historyResponse.data?.messages || []; // Adjust based on actual API response
+      // Sometimes it returns array directly, sometimes { messages: [...] }
+      const msgList = Array.isArray(historyResponse.data) ? historyResponse.data : messages;
+
+      if (msgList.length > 0) {
+        console.log(`🔍 Checking ${msgList.length} messages for names...`);
+        // console.log('DEBUG MSG:', JSON.stringify(msgList[0], null, 2)); // Uncomment if needed
+
+        for (const m of msgList) {
+          const senderJid = m.key?.participant || m.key?.remoteJid; // Group vs DM structure
+          const senderName = m.pushName;
+
+          if (senderJid && senderName) {
+            // Clean up JID if it has device stuff (e.g. :12@s.whatsapp.net)
+            const cleanJid = senderJid.split(':')[0].replace('@s.whatsapp.net', '') + '@s.whatsapp.net';
+
+            // Upsert name into cache list or direct DB update
+            // We only update if it looks like we don't have a good name yet
+            const result = await db.query(`
+                   UPDATE crm.wa_members 
+                   SET display_name = $1 
+                   WHERE whatsapp_id = $2 
+                   AND (
+                      display_name IS NULL 
+                      OR display_name = whatsapp_id 
+                      OR display_name ~ '^[0-9\\s\\+\\(\\-)]*$'
+                      OR display_name LIKE '%@%'
+                      OR display_name = 'Unknown'
+                   )
+                 `, [`~${senderName}`, cleanJid]);
+
+            if (result.rowCount > 0) updatedCount++;
+          }
+        }
+      }
+    } catch (histErr) {
+      console.warn(`History Harvest warning: ${histErr.message}`);
+      // Don't fail the whole request, just log it.
+    }
+
+    console.log(`✅ Fixed ~Names for ${updatedCount} strangers (Metadata + History).`);
     res.json({
       success: true,
       fixed: updatedCount,
-      totalScanned: membersList.length,
+      totalMetadataScanned: membersList.length,
       debug_skipped_samples: debugSkipped,
       sample_record: membersList.length > 0 ? membersList[0] : null
     });
@@ -1040,6 +1098,109 @@ async function triggerTargetedEnrichment(groupId, members) {
   }
   console.log('🧠 Encryption Batch Complete.');
 }
+
+// MANUAL IMPORT: Parse Local Chat Export for History & Names
+app.post('/api/admin/import-local-chat', async (req, res) => {
+  console.log('📂 Starting Local Chat Import...');
+
+  // HARDCODED PATH to the file on the Server/Host
+  const FILE_PATH = `C:\\Users\\Kommal\\Documents\\Antigravity files\\whatsapp_intelligence\\CEO COffee club\\WhatsApp Chat with CEOCoffee is an invite only curated network for current and former CEO’s..txt`;
+  const GROUP_JID = '120363247777014034@g.us';
+
+  try {
+    if (!fs.existsSync(FILE_PATH)) {
+      throw new Error(`File not found at ${FILE_PATH}`);
+    }
+
+    const content = fs.readFileSync(FILE_PATH, 'utf8');
+    const lines = content.split('\n');
+    console.log(`📄 Parsing ${lines.length} lines...`);
+
+    let messageCount = 0;
+    let nameUpdates = 0;
+
+    // Regex for: 28/02/2024, 14:49 - Sender: Message
+    const lineRegex = /^(\d{2}\/\d{2}\/\d{4}), (\d{2}:\d{2}) - ([^:]+): (.+)$/;
+    const introRegex = /(?:hi|hello|hey) (?:everyone|all|group|there).{0,20}(?:i'?m|this is|name is) ([A-Za-z ]+)/i;
+
+    for (const line of lines) {
+      const match = line.match(lineRegex);
+      if (match) {
+        const [_, dateStr, timeStr, senderRaw, bodyRaw] = match;
+
+        // Parse Timestamp
+        const [day, month, year] = dateStr.split('/');
+        const timestamp = new Date(`${year}-${month}-${day}T${timeStr}:00`).getTime() / 1000;
+
+        let senderId = null;
+        const sender = senderRaw.trim();
+        const isPhone = /^[+\d \-\(\)]+$/.test(sender);
+
+        if (isPhone) {
+          senderId = `${sender.replace(/\D/g, '')}@s.whatsapp.net`;
+        } else {
+          continue;
+        }
+
+        const body = bodyRaw.trim();
+
+        // 1. Upsert Member
+        await db.query(`
+            INSERT INTO crm.wa_members (whatsapp_id, display_name)
+            VALUES ($1, NULL)
+            ON CONFLICT (whatsapp_id) DO NOTHING
+        `, [senderId]);
+
+        // 2. Link Member to Group (Critical for "members" count)
+        await db.query(`
+             INSERT INTO crm.wa_groupmembers (group_id, member_id, joined_at, is_admin)
+             VALUES ($1, $2, to_timestamp($3), false)
+             ON CONFLICT (group_id, member_id) DO NOTHING
+        `, [GROUP_JID, senderId, timestamp]);
+
+        // 3. Insert Message
+        const pseudoId = `imp_${timestamp}_${senderId.split('@')[0]}`;
+        await db.query(`
+            INSERT INTO crm.wa_messages (id, group_id, sender_id, sender_name, body, timestamp, from_me, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO NOTHING
+        `, [pseudoId, GROUP_JID, senderId, sender, body, timestamp, false, 'READ']);
+
+        messageCount++;
+
+        // 4. Name Mining
+        let minedName = null;
+        const introMatch = body.match(introRegex);
+        if (introMatch && introMatch[1]) {
+          minedName = introMatch[1].trim();
+        } else {
+          const hereMatch = /(?:^|\s)([A-Z][a-z]+ [A-Z][a-z]+) here/i.exec(body);
+          if (hereMatch) minedName = hereMatch[1];
+        }
+
+        if (minedName && minedName.length < 30 && minedName.length > 2) {
+          const updateRes = await db.query(`
+                UPDATE crm.wa_members 
+                SET display_name = $1
+                WHERE whatsapp_id = $2
+                AND (display_name IS NULL OR display_name ~ '^[0-9\\s\\+\\(\\-)]*$')
+            `, [`~${minedName}`, senderId]);
+
+          if (updateRes.rowCount > 0) {
+            nameUpdates++;
+          }
+        }
+      }
+    }
+
+    console.log(`✅ Import Success: ${messageCount} msgs, ${nameUpdates} names found.`);
+    res.json({ success: true, importedMessages: messageCount, namesDiscovered: nameUpdates });
+
+  } catch (error) {
+    console.error('❌ Import Failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============================================
 // START SERVER
