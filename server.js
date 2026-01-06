@@ -291,6 +291,94 @@ app.get('/api/social/linkedin/recent-posts', async (req, res) => {
   }
 });
 
+// Get Members of Specific Group (Synced via Pilot)
+app.get('/api/groups/:groupId/members', async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    // We treat groupId as JID if it contains '@'
+    const query = groupId.includes('@')
+      ? `
+        SELECT 
+          m.member_id as "memberId",
+          m.whatsapp_id as "whatsappMemberId",
+          m.display_name as "displayName",
+          m.phone_number as "phoneNumber",
+          m.job_title as "jobTitle",
+          m.company_name as "companyName",
+          gm.is_admin as "isAdmin",
+          DATE_PART('day', NOW() - m.last_enriched_at) as "daysSinceEnrichment",
+          m.chat_profile_summary as "chatProfileSummary"
+        FROM crm.wa_members m
+        JOIN crm.wa_groupmembers gm ON m.member_id = gm.member_id
+        JOIN crm.wa_groups g ON gm.group_id = g.group_id
+        WHERE g.whatsapp_group_id = $1
+        ORDER BY m.display_name ASC
+      `
+      : `
+        SELECT 
+          m.member_id as "memberId",
+          m.whatsapp_id as "whatsappMemberId",
+          m.display_name as "displayName",
+          m.phone_number as "phoneNumber",
+          gm.is_admin as "isAdmin"
+        FROM crm.wa_members m
+        JOIN crm.wa_groupmembers gm ON m.member_id = gm.member_id
+        WHERE gm.group_id = $1
+        ORDER BY m.display_name ASC
+      `;
+
+    const result = await db.query(query, [groupId]);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(`Error fetching members for group ${req.params.groupId}:`, error);
+    res.status(500).json({ error: 'Failed to fetch group members' });
+  }
+});
+
+// Get Messages of Specific Group (Synced via Pilot/Webhooks)
+app.get('/api/groups/:groupId/messages', async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const query = groupId.includes('@')
+      ? `
+        SELECT 
+          m.message_id as id,
+          m.whatsapp_message_id as "whatsappId",
+          m.message_content as body,
+          m.timestamp,
+          mem.display_name as "senderName",
+          mem.member_id as "senderId",
+          m.is_question as "isQuestion",
+          m.sentiment
+        FROM crm.wa_messages m
+        LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
+        JOIN crm.wa_groups g ON m.group_id = g.group_id
+        WHERE g.whatsapp_group_id = $1
+        ORDER BY m.timestamp DESC
+        LIMIT 50
+      `
+      : `SELECT * FROM crm.wa_messages WHERE group_id = $1 LIMIT 50`; // Fallback
+
+    const result = await db.query(query, [groupId]);
+
+    // Transform for frontend format matches
+    const transformed = result.rows.map(row => ({
+      id: row.id,
+      group_id: groupId,
+      sender_id: row.senderId,
+      sender_name: row.senderName || 'Unknown',
+      body: row.body,
+      timestamp: typeof row.timestamp === 'object' ? Math.floor(new Date(row.timestamp).getTime() / 1000) : row.timestamp,
+      is_from_me: false // Simplified for view
+    }));
+
+    res.json(transformed);
+  } catch (error) {
+    console.error(`Error fetching messages for group ${req.params.groupId}:`, error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
 // Update Group Settings (By ID)
 app.patch('/api/groups/:groupId', async (req, res) => {
   try {
