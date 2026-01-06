@@ -887,7 +887,7 @@ app.post('/api/sync/names', async (req, res) => {
   }
 });
 
-// GROUP NAME RESCUE: Fix "Strangers" (Non-Contacts) in a specific group
+// GROUP NAME RESCUE & FULL SYNC: Fix "Strangers" and ensure all members exist
 app.post('/api/sync/group-names', async (req, res) => {
   try {
     const { groupJid, instanceName } = req.body;
@@ -916,31 +916,65 @@ app.post('/api/sync/group-names', async (req, res) => {
     }
 
     let updatedCount = 0;
+    let insertedCount = 0;
     const debugSkipped = [];
 
+    // 1. FIRST PASS: Ensure everyone exists in DB (Handle LID vs JID)
     for (const p of membersList) {
-      // HANDLE ID MISMATCH:
-      // The API might return 'id' as an object { _serialized: '...' } or a string.
-      // It might also return LIDs. We strictly want the Phone JID (@s.whatsapp.net).
+      // HANDLE LID MISMATCH:
+      // If 'id' is an LID (e.g. 123...456@lid), we MUST look for 'phoneNumber' 
+      // inside the object to get the real JID (@s.whatsapp.net).
 
       let waId = null;
 
-      if (typeof p.id === 'string') {
-        waId = p.id;
-      } else if (p.id && p.id._serialized) {
-        waId = p.id._serialized;
+      // Priority 1: Explicit phoneNumber field (seen in Typebot/Evo docs)
+      if (p.phoneNumber) {
+        waId = Object.keys(p.phoneNumber).length === 0 ? null : p.phoneNumber; // sometimes empty obj
+        if (typeof waId === 'object') waId = null;
       }
 
-      // If it's an LID (starts with high numbers usually, ends in @lid)
-      // We try to construct the Phone JID if 'id' is LID but we have a number?
-      // Actually, findGroupInfos usually returns the correct JID in `id._serialized`.
+      // Priority 2: Standard JID in 'id'
+      if (!waId) {
+        let rawId = (typeof p.id === 'object') ? p.id._serialized : p.id;
+        if (rawId && rawId.includes('@s.whatsapp.net')) waId = rawId;
 
-      // Fallback: If we have an LID, but good pushName, we need to map it. 
-      // For now, let's assume findGroupInfos gives us the standard JID.
+        // Priority 3: Fallback - if LID is all we have, check if we can parse it? 
+        // Usually we can't map LID -> Phone easily without `phoneNumber` field.
+        // However, sometimes `id` IS the LID, but `phoneNumber` is present as a string.
+      }
 
+      // Priority 3: Explicit check for known LID pattern
+      if (!waId && p.phoneNumber) {
+        waId = p.phoneNumber; // Trust this field if present
+      }
+
+      if (!waId) continue; // Skip if we really can't find a phone ID
+
+      // CLEANUP: 447887...@s.whatsapp.net
+      waId = waId.split(':')[0]; // Remove device bits
+      if (!waId.includes('@s.whatsapp.net')) waId += '@s.whatsapp.net';
+
+      // UPSERT MEMBER (Ensure they exist)
+      await db.query(`
+            INSERT INTO crm.wa_members (whatsapp_id, display_name)
+            VALUES ($1, NULL)
+            ON CONFLICT (whatsapp_id) DO NOTHING
+       `, [waId]);
+
+      // UPSERT GROUP LINK (Ensure they are in the group)
+      // We assume 'now' as join time if missing, or use DB default
+      const linkRes = await db.query(`
+            INSERT INTO crm.wa_groupmembers (group_id, member_id, is_admin)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (group_id, member_id) DO NOTHING
+       `, [groupJid, waId, p.admin === 'admin' || p.admin === 'superadmin']);
+
+      if (linkRes.rowCount > 0) insertedCount++;
+
+      // NOW RESCUE NAME
       const rawName = p.pushName || p.notify || p.name; // extended search for name keys
 
-      if (!waId || !rawName) continue;
+      if (!rawName) continue;
 
       // Enhanced Logic: Overwrite if NULL, ID, Phone-like, OR 'Unknown'
       const result = await db.query(`
@@ -958,14 +992,6 @@ app.post('/api/sync/group-names', async (req, res) => {
 
       if (result.rowCount > 0) {
         updatedCount++;
-      } else if (debugSkipped.length < 5) {
-        const currentDb = await db.query('SELECT display_name FROM crm.wa_members WHERE whatsapp_id = $1', [waId]);
-        debugSkipped.push({
-          waId,
-          pushName: rawName,
-          currentDbValue: currentDb.rows[0]?.display_name || 'NOT_FOUND_IN_DB',
-          reason: 'DB refused update or ID mismatch'
-        });
       }
     }
 
@@ -1001,6 +1027,11 @@ app.post('/api/sync/group-names', async (req, res) => {
             // Clean up JID if it has device stuff (e.g. :12@s.whatsapp.net)
             const cleanJid = senderJid.split(':')[0].replace('@s.whatsapp.net', '') + '@s.whatsapp.net';
 
+            // Ensure existence just in case
+            await db.query(`
+               INSERT INTO crm.wa_members (whatsapp_id, display_name) VALUES ($1, NULL) ON CONFLICT DO NOTHING
+            `, [cleanJid]);
+
             // Upsert name into cache list or direct DB update
             // We only update if it looks like we don't have a good name yet
             const result = await db.query(`
@@ -1025,12 +1056,12 @@ app.post('/api/sync/group-names', async (req, res) => {
       // Don't fail the whole request, just log it.
     }
 
-    console.log(`✅ Fixed ~Names for ${updatedCount} strangers (Metadata + History).`);
+    console.log(`✅ Fixed ~Names for ${updatedCount} strangers. Created/Linked ${insertedCount} members.`);
     res.json({
       success: true,
       fixed: updatedCount,
-      totalMetadataScanned: membersList.length,
-      debug_skipped_samples: debugSkipped,
+      created_or_linked: insertedCount,
+      totalScanned: membersList.length,
       sample_record: membersList.length > 0 ? membersList[0] : null
     });
 
@@ -1199,6 +1230,61 @@ app.post('/api/admin/import-local-chat', async (req, res) => {
   } catch (error) {
     console.error('❌ Import Failed:', error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// MANUAL INJECT: Batch insert members (from OCR or import scripts)
+app.post('/api/admin/inject-members', async (req, res) => {
+  const { members } = req.body; // Array of { whatsapp_id, display_name }
+  const GROUP_JID = '120363247777014034@g.us';
+
+  if (!members || !Array.isArray(members)) {
+    return res.status(400).json({ error: 'Invalid members array' });
+  }
+
+  console.log(`💉 INJECT: Processing batch of ${members.length} members...`);
+
+  let inserted = 0;
+  let updated = 0;
+
+  try {
+    for (const m of members) {
+      if (!m.whatsapp_id || !m.whatsapp_id.includes('@s.whatsapp.net')) continue;
+
+      // 1. Upsert Member
+      await db.query(`
+            INSERT INTO crm.wa_members (whatsapp_id, display_name)
+            VALUES ($1, $2)
+            ON CONFLICT (whatsapp_id) DO NOTHING
+          `, [m.whatsapp_id, m.display_name]);
+
+      // 2. Update Name if better
+      if (m.display_name && m.display_name.length > 1) {
+        const up = await db.query(`
+                UPDATE crm.wa_members
+                SET display_name = $1
+                WHERE whatsapp_id = $2
+                AND (display_name IS NULL OR display_name = whatsapp_id OR display_name LIKE '%@%' OR display_name = 'Unknown')
+             `, [m.display_name, m.whatsapp_id]);
+        if (up.rowCount > 0) updated++;
+      }
+
+      // 3. Link to Group
+      await db.query(`
+             INSERT INTO crm.wa_groupmembers (group_id, member_id, is_admin)
+             VALUES ($1, $2, false)
+             ON CONFLICT (group_id, member_id) DO NOTHING
+          `, [GROUP_JID, m.whatsapp_id]);
+
+      inserted++;
+    }
+
+    console.log(`✅ Inject Complete. Processed ${inserted}, Updated Names ${updated}`);
+    res.json({ success: true, processed: inserted, updatedNames: updated });
+
+  } catch (err) {
+    console.error('Inject Failed:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
