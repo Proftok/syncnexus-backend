@@ -267,7 +267,6 @@ router.post('/messages', async (req, res) => {
         message,
         "messageTimestamp",
         "pushName",
-        "owner"
       FROM evolution_api."Message"
       WHERE (key->>'remoteJid') = $1
       ORDER BY "messageTimestamp" DESC
@@ -404,3 +403,4 @@ router.post('/messages', async (req, res) => {
 
 
 module.exports = router;
+
