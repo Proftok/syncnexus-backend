@@ -689,10 +689,22 @@ app.post('/api/sync/pilot', async (req, res) => {
     );
 
     const participants = response.data;
-    // Handle Evolution API variations (data vs array)
-    const membersList = participants.data || participants;
+    console.log(`DEBUG: Raw Participants Response Type: ${typeof participants}`);
 
-    if (!Array.isArray(membersList)) throw new Error('Invalid participants response');
+    // Handle Evolution API variations
+    let membersList = null;
+    if (Array.isArray(participants)) {
+      membersList = participants;
+    } else if (participants.data && Array.isArray(participants.data)) {
+      membersList = participants.data;
+    } else if (participants.participants && Array.isArray(participants.participants)) {
+      membersList = participants.participants;
+    }
+
+    if (!membersList) {
+      console.error('CRITICAL API DUMP:', JSON.stringify(participants).substring(0, 500));
+      throw new Error(`Invalid participants response. Keys found: ${Object.keys(participants).join(', ')}`);
+    }
 
     console.log(`👥 Found ${membersList.length} participants.`);
 
