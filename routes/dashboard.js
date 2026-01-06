@@ -144,26 +144,9 @@ router.get('/social/birthdays/upcoming', async (req, res) => {
     }
 });
 
-// SOCIAL - LINKEDIN POSTS
+// SOCIAL - LINKEDIN POSTS (Placeholder - table not created yet)
 router.get('/social/linkedin/recent-posts', async (req, res) => {
-    try {
-        const result = await db.query(`
-      SELECT 
-        post_id,
-        member_id,
-        post_content as post_summary,
-        post_date,
-        (SELECT display_name FROM crm.wa_members WHERE member_id = lp.member_id) as name
-      FROM crm.linkedin_posts lp
-      WHERE post_date > NOW() - INTERVAL '7 days'
-      ORDER BY post_date DESC
-      LIMIT 10
-    `);
-        res.json(result.rows);
-    } catch (error) {
-        console.error('Error fetching LinkedIn posts:', error);
-        res.json([]); // Return empty array instead of error
-    }
+  res.json([]); // Return empty array (feature not implemented)
 });
 
 module.exports = router;
