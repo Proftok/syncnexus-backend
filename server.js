@@ -5,7 +5,7 @@ const { Pool } = require('pg');
 const axios = require('axios');
 const cron = require('node-cron');
 const fs = require('fs');
-const fs = require('fs');
+
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -1198,6 +1198,99 @@ app.post('/api/admin/import-local-chat', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Import Failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// CHECK EXISTENCE: Verify if a list of IDs exists in the DB
+app.post('/api/admin/check-members', async (req, res) => {
+  const { whatsappIds } = req.body;
+
+  if (!whatsappIds || !Array.isArray(whatsappIds)) {
+    return res.status(400).json({ error: 'Invalid input. Expected array of whatsappIds.' });
+  }
+
+  try {
+    const result = await db.query(`
+      SELECT whatsapp_id, display_name 
+      FROM crm.wa_members 
+      WHERE whatsapp_id = ANY($1)
+    `, [whatsappIds]);
+
+    const foundMap = {};
+    result.rows.forEach(row => {
+      foundMap[row.whatsapp_id] = row.display_name;
+    });
+
+    res.json({
+      checked: whatsappIds.length,
+      found: result.rowCount,
+      foundMembers: foundMap
+    });
+
+  } catch (err) {
+    console.error('Check failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DIAGNOSTIC: Check if Evolution participants exist in DB
+app.post('/api/admin/verify-group-sync', async (req, res) => {
+  const { groupJid, instanceName } = req.body;
+  const finalInstanceName = instanceName || 'sa-personal';
+
+  console.log(`🕵️ DIAGNOSTIC: Verifying DB status for members of ${groupJid}...`);
+
+  try {
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY;
+
+    // 1. Fetch Live Participants from Evolution
+    const response = await axios.get(
+      `${evolutionUrl}/group/findGroupInfos/${finalInstanceName}?groupJid=${groupJid}`,
+      { headers: { 'apikey': apiKey } }
+    );
+
+    const groupInfo = response.data;
+    const participants = groupInfo.participants || [];
+
+    if (participants.length === 0) {
+      return res.json({ error: 'Evolution returned 0 participants.' });
+    }
+
+    // 2. Extract Standard JIDs
+    const evoJids = [];
+    participants.forEach(p => {
+      let jid = p.id;
+      if (typeof p.id === 'object') jid = p.id._serialized;
+      // Extract number to ensure clean match
+      const num = jid.split('@')[0].split(':')[0];
+      if (!isNaN(num) && num.length > 5) evoJids.push(`${num}@s.whatsapp.net`);
+    });
+
+    const uniqueEvoJids = [...new Set(evoJids)];
+
+    // 3. Query DB
+    const result = await db.query(`
+        SELECT whatsapp_id FROM crm.wa_members 
+        WHERE whatsapp_id = ANY($1)
+    `, [uniqueEvoJids]);
+
+    const dbJids = new Set(result.rows.map(r => r.whatsapp_id));
+
+    const missing = uniqueEvoJids.filter(id => !dbJids.has(id));
+
+    res.json({
+      evolution_count: participants.length,
+      unique_jids_extracted: uniqueEvoJids.length,
+      db_match_count: result.rowCount,
+      missing_count: missing.length,
+      missing_samples: missing.slice(0, 5),
+      status: missing.length === 0 ? 'SYNCED' : 'INCOMPLETE'
+    });
+
+  } catch (error) {
+    console.error('Diagnostic Failed:', error);
     res.status(500).json({ error: error.message });
   }
 });
