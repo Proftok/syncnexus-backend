@@ -240,138 +240,98 @@ router.post('/full-sync', async (req, res) => {
     }
 });
 
-// 3. SYNC MESSAGES (Fixed for Evolution API v2.3.x)
+// 3. SYNC MESSAGES (Fixed Column Names for Evolution v2)
 router.post('/messages', async (req, res) => {
   try {
-    const { groupJid, instanceName, limit } = req.body;
-    const finalInstanceName = instanceName || process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
+    const { groupJid, limit } = req.body;
     const messageLimit = limit || 100;
 
-    console.log(`💬 Starting message sync for ${groupJid} (limit: ${messageLimit})...`);
+    console.log(`💬 Syncing messages from Evolution database for ${groupJid}...`);
 
-    const evolutionUrl = process.env.EVOLUTION_API_URL;
-    const apiKey = process.env.EVOLUTION_API_KEY;
-
-    if (!evolutionUrl || !apiKey) throw new Error('Missing Evolution Config');
-
-    // Verify group exists in database
+    // Verify group exists in our database
     const groupRes = await db.query(
       'SELECT group_id FROM crm.wa_groups WHERE whatsapp_group_id = $1',
       [groupJid]
     );
 
     if (groupRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Group not found in database. Sync groups first.' });
+      return res.status(404).json({ error: 'Group not found. Sync groups first.' });
     }
 
     const groupId = groupRes.rows[0].group_id;
 
-    // METHOD 1: Try findMessages endpoint (POST)
-    console.log('🔍 Attempting Evolution API: POST /message/findMessages...');
-    
-    let messages = [];
-    try {
-      const response = await axios.post(
-        `${evolutionUrl}/message/findMessages/${finalInstanceName}`,
-        {
-          groupJid: groupJid,
-          limit: messageLimit
-        },
-        {
-          headers: { 
-            'Content-Type': 'application/json',
-            'apikey': apiKey 
-          }
-        }
-      );
+    // Query Evolution's Message table with correct column structure
+    const evolutionMessages = await db.query(`
+      SELECT 
+        key,
+        message,
+        "messageTimestamp",
+        "pushName",
+        "owner"
+      FROM evolution_api."Message"
+      WHERE (key->>'remoteJid') = $1
+      ORDER BY "messageTimestamp" DESC
+      LIMIT $2
+    `, [groupJid, messageLimit]);
 
-      messages = response.data?.messages || response.data || [];
-      console.log(`✅ Method 1 success: ${messages.length} messages fetched`);
+    console.log(`📦 Found ${evolutionMessages.rows.length} messages in Evolution database`);
 
-    } catch (err) {
-      // METHOD 2: Fallback to fetch all messages and filter client-side
-      console.log('⚠️ Method 1 failed, trying fallback: GET /message/fetch...');
-      
-      try {
-        const fallbackResponse = await axios.get(
-          `${evolutionUrl}/message/fetch/${finalInstanceName}`,
-          {
-            headers: { 'apikey': apiKey },
-            params: { limit: 500 } // Fetch more for filtering
-          }
-        );
-
-        const allMessages = fallbackResponse.data?.messages || fallbackResponse.data || [];
-        
-        // Client-side filter by groupJid
-        messages = allMessages.filter(msg => {
-          const remoteJid = msg.key?.remoteJid;
-          return remoteJid === groupJid;
-        }).slice(0, messageLimit);
-
-        console.log(`✅ Method 2 success: Filtered ${messages.length}/${allMessages.length} messages for group`);
-
-      } catch (fallbackErr) {
-        throw new Error(`Both methods failed. Error: ${fallbackErr.message}`);
-      }
-    }
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.json({ 
-        success: true, 
-        saved: 0, 
-        fetched: 0,
-        message: 'No messages found for this group' 
+    if (evolutionMessages.rows.length === 0) {
+      return res.json({
+        success: true,
+        saved: 0,
+        message: 'No messages found for this group'
       });
     }
-
-    console.log(`📦 Processing ${messages.length} messages...`);
 
     let savedCount = 0;
     let skippedCount = 0;
 
-    for (const msg of messages) {
+    for (const row of evolutionMessages.rows) {
       try {
-        const key = msg.key || {};
+        // Parse JSON columns
+        const key = typeof row.key === 'string' ? JSON.parse(row.key) : row.key;
+        const message = typeof row.message === 'string' ? JSON.parse(row.message) : row.message;
+
         const messageId = key.id;
-        
-        if (!messageId) {
-          skippedCount++;
-          continue;
-        }
-
-        const isFromMe = key.fromMe;
+        const isFromMe = key.fromMe || false;
         const senderJid = isFromMe ? 'ME' : (key.participant || key.remoteJid);
-        const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
+        const timestamp = row.messageTimestamp || Math.floor(Date.now() / 1000);
+        const pushName = row.pushName || 'Unknown';
 
-        // Extract message body
+        // Extract message content
         let body = '';
-        if (msg.message?.conversation) {
-          body = msg.message.conversation;
-        } else if (msg.message?.extendedTextMessage?.text) {
-          body = msg.message.extendedTextMessage.text;
-        } else if (msg.message?.imageMessage?.caption) {
-          body = `[Image] ${msg.message.imageMessage.caption}`;
-        } else if (msg.message?.videoMessage?.caption) {
-          body = `[Video] ${msg.message.videoMessage.caption}`;
-        } else if (msg.message?.documentMessage) {
+        if (message?.conversation) {
+          body = message.conversation;
+        } else if (message?.extendedTextMessage?.text) {
+          body = message.extendedTextMessage.text;
+        } else if (message?.imageMessage?.caption) {
+          body = `[Image] ${message.imageMessage.caption || ''}`;
+        } else if (message?.videoMessage?.caption) {
+          body = `[Video] ${message.videoMessage.caption || ''}`;
+        } else if (message?.documentMessage) {
           body = '[Document]';
+        } else if (message?.audioMessage) {
+          body = '[Audio]';
+        } else if (message?.stickerMessage) {
+          body = '[Sticker]';
         } else {
-          body = '[Media/System Message]';
+          body = '[Media/System]';
         }
 
-        // Skip empty or very short messages
+        // Skip very short or empty messages
         if (!body || body.length < 2) {
           skippedCount++;
           continue;
         }
 
-        // Ensure sender exists in members table
+        // Ensure sender exists in our members table
         await db.query(`
           INSERT INTO crm.wa_members (whatsapp_id, display_name)
           VALUES ($1, $2)
-          ON CONFLICT (whatsapp_id) DO NOTHING
-        `, [senderJid, msg.pushName || 'Unknown']);
+          ON CONFLICT (whatsapp_id) 
+          DO UPDATE SET display_name = COALESCE(NULLIF($2, ''), crm.wa_members.display_name)
+        `, [senderJid, pushName]);
 
         // Get member_id
         const memberRes = await db.query(
@@ -380,16 +340,25 @@ router.post('/messages', async (req, res) => {
         );
 
         if (memberRes.rows.length === 0) {
+          console.warn(`Member not found for ${senderJid}`);
           skippedCount++;
           continue;
         }
 
         const memberId = memberRes.rows[0].member_id;
 
-        // Insert message
+        // Determine media type
+        const hasMedia = message?.imageMessage || message?.videoMessage || message?.audioMessage || message?.documentMessage;
+        let mediaType = 'text';
+        if (message?.imageMessage) mediaType = 'image';
+        else if (message?.videoMessage) mediaType = 'video';
+        else if (message?.audioMessage) mediaType = 'audio';
+        else if (message?.documentMessage) mediaType = 'document';
+
+        // Insert into our messages table
         const insertResult = await db.query(`
           INSERT INTO crm.wa_messages (
-            whatsapp_message_id, group_id, sender_id, message_content, 
+            whatsapp_message_id, group_id, sender_id, message_content,
             created_at, has_media, media_type, is_from_me
           ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7, $8)
           ON CONFLICT (whatsapp_message_id) DO NOTHING
@@ -400,28 +369,28 @@ router.post('/messages', async (req, res) => {
           memberId,
           body,
           timestamp,
-          msg.message?.imageMessage || msg.message?.videoMessage ? true : false,
-          msg.message?.imageMessage ? 'image' : (msg.message?.videoMessage ? 'video' : 'text'),
+          hasMedia ? true : false,
+          mediaType,
           isFromMe
         ]);
 
         if (insertResult.rowCount > 0) {
           savedCount++;
         } else {
-          skippedCount++; // Duplicate message
+          skippedCount++; // Duplicate
         }
 
       } catch (msgError) {
-        console.error('Failed to save message:', msgError.message);
+        console.error('Failed to process message:', msgError.message);
         skippedCount++;
       }
     }
 
-    console.log(`✅ Message sync complete: ${savedCount} saved, ${skippedCount} skipped`);
+    console.log(`✅ Sync complete: ${savedCount} saved, ${skippedCount} skipped`);
 
     res.json({
       success: true,
-      totalFetched: messages.length,
+      totalFound: evolutionMessages.rows.length,
       saved: savedCount,
       skipped: skippedCount
     });
@@ -431,6 +400,7 @@ router.post('/messages', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 
 module.exports = router;
