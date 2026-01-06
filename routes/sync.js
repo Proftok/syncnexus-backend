@@ -27,7 +27,7 @@ async function getOrCreateInstanceId(evolutionInstanceName) {
 router.post('/groups', async (req, res) => {
     try {
         const { instanceName } = req.body;
-        const finalInstanceName = instanceName || 'sa-personal';
+        const finalInstanceName = instanceName || process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
         console.log(`🔄 Starting group sync (Metadata Only) for ${finalInstanceName}...`);
 
         const evolutionUrl = process.env.EVOLUTION_API_URL;
@@ -72,7 +72,7 @@ router.post('/groups', async (req, res) => {
 // 2. PILOT SYNC (Deep member sync with Integer Fix)
 router.post('/group-names', async (req, res) => {
     const { groupJid, instanceName } = req.body;
-    const finalInstanceName = instanceName || 'sa-personal';
+    const finalInstanceName = instanceName || process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
 
     console.log(`🛠️ SYNC & RESCUE: Starting Deep Sync for ${groupJid}...`);
     const evolutionUrl = process.env.EVOLUTION_API_URL;

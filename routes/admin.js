@@ -6,7 +6,10 @@ const axios = require('axios');
 // 1. INJECT MEMBERS (Batch)
 router.post('/inject-members', async (req, res) => {
     const { members } = req.body;
-    const GROUP_JID = '120363247777014034@g.us';
+    // Use ENV or Fallback (For Inject Tool)
+    const GROUP_JID = process.env.CEO_GROUP_ID;
+
+    if (!GROUP_JID) return res.status(500).json({ error: "Missing CEO_GROUP_ID in environment" });
 
     if (!members || !Array.isArray(members)) return res.status(400).json({ error: 'Invalid members' });
     console.log(`💉 INJECT: Processing batch of ${members.length}...`);
