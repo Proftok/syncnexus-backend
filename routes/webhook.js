@@ -5,10 +5,12 @@ const db = require('../config/db');
 // PROCESS INCOMING WEBHOOKS
 router.post('/evolution', async (req, res) => {
     try {
-        const { type, data } = req.body;
-        console.log(`⚡ Webhook received: ${type}`);
+        const { type, data, event } = req.body; // Check for 'event' too
+        const eventType = type || event; // Evolution sometimes sends 'event'
+        console.log(`⚡ Webhook received: ${eventType}`);
+        if (!eventType) console.log('DEBUG BODY:', JSON.stringify(req.body, null, 2));
 
-        if (type === 'messages.upsert') {
+        if (eventType === 'messages.upsert') {
             const message = data.data;
             if (!message) return res.status(200).send('No data');
 
@@ -45,7 +47,7 @@ router.post('/evolution', async (req, res) => {
                 // INSERT MESSAGE
                 await db.query(`
                     INSERT INTO crm.wa_messages (
-                        whatsapp_message_id, group_id, sender_id, message_content, created_at_ts, has_media, media_type
+                        whatsapp_message_id, group_id, sender_id, message_content, created_at, has_media, media_type
                     ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7)
                     ON CONFLICT (whatsapp_message_id) DO NOTHING
                 `, [key.id, groupId, memberId, body, timestamp, false, 'text']);

@@ -92,7 +92,7 @@ router.get('/groups/:jid/messages', async (req, res) => {
             JOIN crm.wa_groups g ON m.group_id = g.group_id
             LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
             WHERE g.whatsapp_group_id = $1
-            ORDER BY m.created_at_ts DESC
+            ORDER BY m.created_at DESC
             LIMIT 50
         `, [jid]);
         res.json(result.rows);
