@@ -240,7 +240,7 @@ router.post('/full-sync', async (req, res) => {
     }
 });
 
-// 4. SYNC MESSAGES (Historical Chat Sync)
+// 3. SYNC MESSAGES (Fixed for Evolution API v2.3.x)
 router.post('/messages', async (req, res) => {
   try {
     const { groupJid, instanceName, limit } = req.body;
@@ -266,26 +266,66 @@ router.post('/messages', async (req, res) => {
 
     const groupId = groupRes.rows[0].group_id;
 
-    // Fetch messages from Evolution API
-    const response = await axios.get(
-      `${evolutionUrl}/chat/findMessages/${finalInstanceName}`,
-      {
-        headers: { 'apikey': apiKey },
-        params: {
-          remoteJid: groupJid,
-          limit: messageLimit
-        }
-      }
-    );
-
-    const messages = response.data?.messages || response.data || [];
+    // METHOD 1: Try findMessages endpoint (POST)
+    console.log('🔍 Attempting Evolution API: POST /message/findMessages...');
     
-    if (!Array.isArray(messages)) {
-      console.log('API Response:', JSON.stringify(response.data, null, 2));
-      throw new Error('Invalid response format from Evolution API');
+    let messages = [];
+    try {
+      const response = await axios.post(
+        `${evolutionUrl}/message/findMessages/${finalInstanceName}`,
+        {
+          groupJid: groupJid,
+          limit: messageLimit
+        },
+        {
+          headers: { 
+            'Content-Type': 'application/json',
+            'apikey': apiKey 
+          }
+        }
+      );
+
+      messages = response.data?.messages || response.data || [];
+      console.log(`✅ Method 1 success: ${messages.length} messages fetched`);
+
+    } catch (err) {
+      // METHOD 2: Fallback to fetch all messages and filter client-side
+      console.log('⚠️ Method 1 failed, trying fallback: GET /message/fetch...');
+      
+      try {
+        const fallbackResponse = await axios.get(
+          `${evolutionUrl}/message/fetch/${finalInstanceName}`,
+          {
+            headers: { 'apikey': apiKey },
+            params: { limit: 500 } // Fetch more for filtering
+          }
+        );
+
+        const allMessages = fallbackResponse.data?.messages || fallbackResponse.data || [];
+        
+        // Client-side filter by groupJid
+        messages = allMessages.filter(msg => {
+          const remoteJid = msg.key?.remoteJid;
+          return remoteJid === groupJid;
+        }).slice(0, messageLimit);
+
+        console.log(`✅ Method 2 success: Filtered ${messages.length}/${allMessages.length} messages for group`);
+
+      } catch (fallbackErr) {
+        throw new Error(`Both methods failed. Error: ${fallbackErr.message}`);
+      }
     }
 
-    console.log(`📦 Fetched ${messages.length} messages from Evolution API`);
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.json({ 
+        success: true, 
+        saved: 0, 
+        fetched: 0,
+        message: 'No messages found for this group' 
+      });
+    }
+
+    console.log(`📦 Processing ${messages.length} messages...`);
 
     let savedCount = 0;
     let skippedCount = 0;
@@ -294,6 +334,12 @@ router.post('/messages', async (req, res) => {
       try {
         const key = msg.key || {};
         const messageId = key.id;
+        
+        if (!messageId) {
+          skippedCount++;
+          continue;
+        }
+
         const isFromMe = key.fromMe;
         const senderJid = isFromMe ? 'ME' : (key.participant || key.remoteJid);
         const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
@@ -308,11 +354,13 @@ router.post('/messages', async (req, res) => {
           body = `[Image] ${msg.message.imageMessage.caption}`;
         } else if (msg.message?.videoMessage?.caption) {
           body = `[Video] ${msg.message.videoMessage.caption}`;
+        } else if (msg.message?.documentMessage) {
+          body = '[Document]';
         } else {
           body = '[Media/System Message]';
         }
 
-        // Skip empty or system messages
+        // Skip empty or very short messages
         if (!body || body.length < 2) {
           skippedCount++;
           continue;
@@ -339,12 +387,13 @@ router.post('/messages', async (req, res) => {
         const memberId = memberRes.rows[0].member_id;
 
         // Insert message
-        await db.query(`
+        const insertResult = await db.query(`
           INSERT INTO crm.wa_messages (
             whatsapp_message_id, group_id, sender_id, message_content, 
             created_at, has_media, media_type, is_from_me
           ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7, $8)
           ON CONFLICT (whatsapp_message_id) DO NOTHING
+          RETURNING message_id
         `, [
           messageId,
           groupId,
@@ -356,7 +405,11 @@ router.post('/messages', async (req, res) => {
           isFromMe
         ]);
 
-        savedCount++;
+        if (insertResult.rowCount > 0) {
+          savedCount++;
+        } else {
+          skippedCount++; // Duplicate message
+        }
 
       } catch (msgError) {
         console.error('Failed to save message:', msgError.message);
