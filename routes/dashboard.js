@@ -90,9 +90,9 @@ router.get('/groups/:jid/messages', async (req, res) => {
         m.message_id as "id", 
         m.message_content as "body", 
         m.timestamp as "timestamp",
-        mem.display_name as "sender_name", 
-        mem.member_id as "sender_id", 
-        mem.whatsapp_id as "sender_jid"
+        mem.display_name as "sendername",
+        mem.member_id as "senderid",
+        mem.whatsapp_id as "senderjid"
       FROM crm.wa_messages m
       JOIN crm.wa_groups g ON m.group_id = g.group_id
       LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
@@ -107,6 +107,7 @@ router.get('/groups/:jid/messages', async (req, res) => {
     res.status(500).json({ error: 'Failed' });
   }
 });
+
 
 
 // UPSERT GROUP SETTINGS
