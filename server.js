@@ -885,6 +885,66 @@ app.post('/api/sync/names', async (req, res) => {
   }
 });
 
+// GROUP NAME RESCUE: Fix "Strangers" (Non-Contacts) in a specific group
+app.post('/api/sync/group-names', async (req, res) => {
+  try {
+    const { groupJid, instanceName } = req.body;
+    const finalInstanceName = instanceName || 'sa-personal';
+
+    console.log(`🚑 GROUP NAME RESCUE: Scanning participants of ${groupJid}...`);
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY;
+
+    // Fetch Group Participants (Usually contains pushName for non-contacts)
+    const response = await axios.get(
+      `${evolutionUrl}/group/participants/${finalInstanceName}?groupJid=${groupJid}`,
+      { headers: { 'apikey': apiKey } }
+    );
+
+    const participants = response.data;
+    let membersList = Array.isArray(participants) ? participants : (participants.data || participants.participants || []);
+
+    if (!membersList || membersList.length === 0) throw new Error("No participants found.");
+
+    let updatedCount = 0;
+    for (const p of membersList) {
+      const waId = p.id;
+      // The user specifically wants "~Name" for strangers.
+      const pushName = p.pushName || p.notify;
+
+      if (!pushName) continue;
+
+      // Logic: Check if current name in DB is just a number. If so, update it.
+      // We do a "dumb" update: If we found a pushName, we enforce it IF the current DB name looks like a phone number.
+
+      // Regex to detect if name is basically a phone number (digits and spaces/pluses only)
+      // OR if we just want to force update "unknowns"
+
+      const phonePart = waId.split('@')[0];
+
+      await db.query(`
+         UPDATE crm.wa_members 
+         SET display_name = $1 
+         WHERE whatsapp_id = $2 
+         AND (display_name = $3 OR display_name IS NULL OR display_name = whatsapp_id)
+       `, [`~${pushName}`, waId, phonePart]); // Add ~ prefix to denote it's a pushname
+
+      // Note: The SQL WHERE clause ensures we don't overwrite "John Real Contact" with "~John".
+      // It only overwrites if the current name is the phone number itself.
+
+      if (p.pushName) updatedCount++;
+    }
+
+    console.log(`✅ Fixed ~Names for ${updatedCount} strangers.`);
+    res.json({ success: true, fixed: updatedCount });
+
+  } catch (error) {
+    console.error('❌ Group Name Rescue Failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // START SERVER
 // ============================================
