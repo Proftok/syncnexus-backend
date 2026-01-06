@@ -361,23 +361,24 @@ console.log(`📦 Fetching messages with offset ${offset}, limit ${messageLimit}
         else if (message?.documentMessage) mediaType = 'document';
 
         // Insert message
-        const insertResult = await db.query(`
-          INSERT INTO crm.wa_messages (
-            whatsapp_message_id, group_id, sender_id, message_content,
-            created_at, has_media, media_type, is_from_me
-          ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7, $8)
-          ON CONFLICT (whatsapp_message_id) DO NOTHING
-          RETURNING message_id
-        `, [
-          messageId,
-          groupId,
-          memberId,
-          body,
-          timestamp,
-          hasMedia,
-          mediaType,
-          isFromMe
-        ]);
+   const insertResult = await db.query(`
+  INSERT INTO crm.wa_messages (
+    whatsapp_message_id, group_id, sender_id, message_content,
+    timestamp, created_at, has_media, media_type, is_from_me
+  ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), TO_TIMESTAMP($5), $6, $7, $8)
+  ON CONFLICT (whatsapp_message_id) DO NOTHING
+  RETURNING message_id
+`, [
+  messageId,
+  groupId,
+  memberId,
+  body,
+  timestamp,
+  hasMedia,
+  mediaType,
+  isFromMe
+]);
+
 
         if (insertResult.rowCount > 0) {
           savedCount++;

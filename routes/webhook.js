@@ -45,12 +45,13 @@ router.post('/evolution', async (req, res) => {
                 const memberId = memberRes.rows[0].member_id;
 
                 // INSERT MESSAGE
-                await db.query(`
-                    INSERT INTO crm.wa_messages (
-                        whatsapp_message_id, group_id, sender_id, message_content, created_at, has_media, media_type
-                    ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7)
-                    ON CONFLICT (whatsapp_message_id) DO NOTHING
-                `, [key.id, groupId, memberId, body, timestamp, false, 'text']);
+            await db.query(`
+  INSERT INTO crm.wa_messages (
+    whatsapp_message_id, group_id, sender_id, message_content, timestamp, created_at, has_media, media_type
+  ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), TO_TIMESTAMP($5), $6, $7)
+  ON CONFLICT (whatsapp_message_id) DO NOTHING
+`, [key.id, groupId, memberId, body, timestamp, false, 'text']);
+
 
                 console.log(`✅ Saved message from ${pushName} in ${remoteJid}`);
             } else {
