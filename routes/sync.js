@@ -151,4 +151,88 @@ router.post('/group-names', async (req, res) => {
     }
 });
 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// 3. MASS SYNC (All Groups + Participants)
+router.post('/full-sync', async (req, res) => {
+    try {
+        const { instanceName } = req.body;
+        const finalInstanceName = instanceName || process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
+
+        console.log(`🚀 STARTING MASS SYNC for ${finalInstanceName}...`);
+
+        const evolutionUrl = process.env.EVOLUTION_API_URL;
+        const apiKey = process.env.EVOLUTION_API_KEY;
+        const instanceId = await getOrCreateInstanceId(finalInstanceName);
+
+        // 1. Get ALL Groups first
+        const groupsRes = await axios.get(
+            `${evolutionUrl}/group/fetchAllGroups/${finalInstanceName}?getParticipants=false`,
+            { headers: { 'apikey': apiKey } }
+        );
+        const groups = groupsRes.data;
+        console.log(`Found ${groups.length} groups. Starting Deep Sync...`);
+
+        // Start background process (don't block UI)
+        res.json({ success: true, message: `Started syncing ${groups.length} groups in background.` });
+
+        // BACKGROUND WORKER
+        (async () => {
+            let processed = 0;
+            for (const group of groups) {
+                processed++;
+                const jid = group.id;
+                console.log(`[${processed}/${groups.length}] Syncing ${group.subject}...`);
+
+                try {
+                    // Update Group Metadata
+                    await db.query(`
+                        INSERT INTO crm.wa_groups (whatsapp_group_id, group_name, participant_count, instance_id, is_active)
+                        VALUES ($1, $2, $3, $4, true)
+                        ON CONFLICT (whatsapp_group_id) DO UPDATE SET updated_at = NOW()
+                    `, [jid, group.subject, group.size, instanceId]);
+
+                    // Fetch Participants
+                    const groupInfo = await axios.get(
+                        `${evolutionUrl}/group/findGroupInfos/${finalInstanceName}?groupJid=${jid}`,
+                        { headers: { 'apikey': apiKey } }
+                    ).catch(() => ({ data: {} }));
+
+                    const participants = groupInfo.data.participants || [];
+
+                    // Bulk Insert Participants (Simplified for speed)
+                    for (const p of participants) {
+                        let waId = (p.id || p.phoneNumber || '').split(':')[0];
+                        if (!waId.includes('@')) waId += '@s.whatsapp.net';
+
+                        // Insert Member
+                        await db.query(`INSERT INTO crm.wa_members (whatsapp_id, display_name) VALUES ($1, $2) ON CONFLICT (whatsapp_id) DO NOTHING`, [waId, p.notify || p.id]);
+
+                        // Insert Link
+                        await db.query(`
+                            INSERT INTO crm.wa_groupmembers (group_id, member_id, is_admin)
+                            SELECT g.group_id, m.member_id, $3
+                            FROM crm.wa_groups g, crm.wa_members m
+                            WHERE g.whatsapp_group_id = $1 AND m.whatsapp_id = $2
+                            ON CONFLICT DO NOTHING
+                        `, [jid, waId, p.admin === 'admin']);
+                    }
+
+                    // Rate Limit Prevention
+                    await delay(1000);
+
+                } catch (e) {
+                    console.error(`Failed to sync ${group.subject}:`, e.message);
+                }
+            }
+            console.log("✅ MASS SYNC COMPLETE");
+        })();
+
+    } catch (error) {
+        console.error("Mass Sync Error:", error);
+        // If response wasn't sent yet
+        if (!res.headersSent) res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = router;
