@@ -913,13 +913,15 @@ app.post('/api/sync/group-names', async (req, res) => {
     }
 
     let updatedCount = 0;
+    const debugSkipped = [];
+
     for (const p of membersList) {
       const waId = p.id;
       const rawName = p.pushName || p.notify; // The "~Name"
 
       if (!rawName) continue;
 
-      // Relaxed Logic: Update if DB name is NULL, is the ID itself, or looks like a phone number.
+      // Enhanced Logic: Overwrite if NULL, ID, Phone-like, OR 'Unknown'
       const result = await db.query(`
          UPDATE crm.wa_members 
          SET display_name = $1 
@@ -927,16 +929,32 @@ app.post('/api/sync/group-names', async (req, res) => {
          AND (
             display_name IS NULL 
             OR display_name = whatsapp_id 
+            OR display_name = 'Unknown'
             OR display_name ~ '^[0-9\\s\\+\\(\\-)]*$'
             OR display_name LIKE '%@%'
          )
        `, [`~${rawName}`, waId]);
 
-      if (result.rowCount > 0) updatedCount++;
+      if (result.rowCount > 0) {
+        updatedCount++;
+      } else if (debugSkipped.length < 5) {
+        // Capture why we skipped this one (for the user to see in PowerShell)
+        const currentDb = await db.query('SELECT display_name FROM crm.wa_members WHERE whatsapp_id = $1', [waId]);
+        debugSkipped.push({
+          waId,
+          pushName: rawName,
+          currentDbValue: currentDb.rows[0]?.display_name || 'NULL'
+        });
+      }
     }
 
     console.log(`✅ Fixed ~Names for ${updatedCount} strangers.`);
-    res.json({ success: true, fixed: updatedCount, totalScanned: membersList.length });
+    res.json({
+      success: true,
+      fixed: updatedCount,
+      totalScanned: membersList.length,
+      debug_skipped_samples: debugSkipped
+    });
 
   } catch (error) {
     console.error('❌ Group Name Rescue Failed:', error.message);
