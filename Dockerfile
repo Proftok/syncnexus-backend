@@ -8,10 +8,11 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install --production
+RUN npm ci --production
 
 # Copy application code
-COPY server.js ./
+# Copy application code
+COPY . .
 
 # Expose port
 EXPOSE 3001
@@ -21,4 +22,3 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3   CMD node
 
 # Start server
 CMD ["node", "server.js"]
-
