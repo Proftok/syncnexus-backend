@@ -824,17 +824,63 @@ app.post('/api/sync/pilot', async (req, res) => {
       } catch (linkErr) {
         console.warn(`Could not link member ${name} to group: ${linkErr.message}`);
       }
-
       importedCount++;
     }
 
-    // Enable Monitoring for this group
-    await db.query('UPDATE crm.wa_groups SET monitoring_enabled = true WHERE group_id = $1', [dbGroupId]);
+    // Start Immediate Analysis (Background) of first 50 members
+    triggerTargetedEnrichment(dbGroupId, membersList.slice(0, 50));
 
-    res.json({ success: true, group: groupJid, imported: importedCount });
+    res.json({ success: true, imported: importedCount, group: groupJid });
 
   } catch (error) {
     console.error('❌ Pilot Sync Failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// NAME RESCUE ENDPOINT: Fetch All Contacts to fix missing names
+app.post('/api/sync/names', async (req, res) => {
+  try {
+    const { instanceName } = req.body;
+    const finalInstanceName = instanceName || 'sa-personal';
+
+    console.log(`🚑 NAME RESCUE: Fetching full contact list for ${finalInstanceName}...`);
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY;
+
+    // 1. Fetch All Contacts (Verified Names)
+    const response = await axios.post(
+      `${evolutionUrl}/chat/findContacts/${finalInstanceName}`,
+      {}, // Body
+      { headers: { 'apikey': apiKey } }
+    );
+
+    const contacts = response.data;
+    if (!Array.isArray(contacts)) throw new Error("Invalid response from Contacts API");
+
+    console.log(`📋 Found ${contacts.length} saved contacts. Updating DB...`);
+
+    let updatedCount = 0;
+    for (const c of contacts) {
+      const waId = c.id;
+      const name = c.name || c.pushName || c.notify;
+      if (!name) continue;
+
+      // Only update if we have a real name (not just a phone number)
+      await db.query(`
+         UPDATE crm.wa_members 
+         SET display_name = $1 
+         WHERE whatsapp_id = $2
+       `, [name, waId]);
+      updatedCount++;
+    }
+
+    console.log(`✅ Updated names for ${updatedCount} members.`);
+    res.json({ success: true, updated: updatedCount });
+
+  } catch (error) {
+    console.error('❌ Name Rescue Failed:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
