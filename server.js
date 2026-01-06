@@ -919,13 +919,17 @@ app.post('/api/sync/group-names', async (req, res) => {
 
       if (!rawName) continue;
 
-      // Relaxed Logic: Update if DB name looks like a phone number (digits, spaces, plus only)
-      // This covers: "123456", "+1 234 56", "1 (234) 56", etc.
+      // Relaxed Logic: Update if DB name is NULL, is the ID itself, or looks like a phone number.
       const result = await db.query(`
          UPDATE crm.wa_members 
          SET display_name = $1 
          WHERE whatsapp_id = $2 
-         AND (display_name IS NULL OR display_name ~ '^[0-9\\s\\+\\(\\-)]*$')
+         AND (
+            display_name IS NULL 
+            OR display_name = whatsapp_id 
+            OR display_name ~ '^[0-9\\s\\+\\(\\-)]*$'
+            OR display_name LIKE '%@%'
+         )
        `, [`~${rawName}`, waId]);
 
       if (result.rowCount > 0) updatedCount++;
@@ -939,6 +943,65 @@ app.post('/api/sync/group-names', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================
+// HELPER: Targeted Enrichment (Missing Function)
+// ============================================
+async function triggerTargetedEnrichment(groupId, members) {
+  console.log(`🧠 Starting Enrichment for ${members.length} members...`);
+
+  for (const m of members) {
+    try {
+      // 1. Check if already enriched recently
+      const dbMember = await db.query('SELECT display_name, job_title FROM crm.wa_members WHERE whatsapp_id = $1', [m.id]);
+      if (dbMember.rows.length > 0 && dbMember.rows[0].job_title) {
+        // Skip if already has job title
+        continue;
+      }
+
+      // 2. Prepare Prompt
+      const name = m.pushName || m.notify || dbMember.rows[0]?.display_name || 'Unknown';
+      if (name === 'Unknown' || !name || name.match(/^[0-9]+$/)) continue; // Can't enrich a number
+
+      const systemPrompt = `
+        You are an expert Data Enricher. 
+        Given a WhatsApp Name (which might include title, company, or credentials), extract:
+        - Full Name
+        - Job Title (inferred or explicit)
+        - Company Name (inferred or explicit)
+        - Seniority Level (C-Level, VP, Director, Manager, OE)
+        
+        Input Name: "${name}"
+        Context: They are in a CEO/Founder networking group.
+        
+        Return JSON: { "jobTitle": "...", "companyName": "...", "seniority": "..." }
+        If unable to infer, return null for fields.
+      `;
+
+      // 3. Call AI
+      const analysis = await generateBackendCompletion(systemPrompt);
+
+      if (analysis) {
+        await db.query(`
+          UPDATE crm.wa_members 
+          SET job_title = $1, 
+              company_name = $2, 
+              last_enriched_at = NOW()
+          WHERE whatsapp_id = $3
+        `, [analysis.jobTitle, analysis.companyName, m.id]);
+
+        console.log(`✨ Enriched: ${name} -> ${analysis.jobTitle} @ ${analysis.companyName}`);
+      }
+
+      // Rate limit safety
+      await new Promise(r => setTimeout(r, 1000));
+
+    } catch (err) {
+      console.error(`Failed to enrich ${m.id}:`, err.message);
+    }
+  }
+  console.log('🧠 Encryption Batch Complete.');
+}
 
 // ============================================
 // START SERVER
