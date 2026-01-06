@@ -943,7 +943,8 @@ app.post('/api/sync/group-names', async (req, res) => {
         debugSkipped.push({
           waId,
           pushName: rawName,
-          currentDbValue: currentDb.rows[0]?.display_name || 'NULL'
+          currentDbValue: currentDb.rows[0]?.display_name || 'NULL',
+          reason: !rawName ? 'No PushName' : 'DB refused update'
         });
       }
     }
@@ -953,7 +954,8 @@ app.post('/api/sync/group-names', async (req, res) => {
       success: true,
       fixed: updatedCount,
       totalScanned: membersList.length,
-      debug_skipped_samples: debugSkipped
+      debug_skipped_samples: debugSkipped,
+      sample_record: membersList.length > 0 ? membersList[0] : null // critical for debugging
     });
 
   } catch (error) {
