@@ -39,6 +39,25 @@ router.get('/groups', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// GET MEMBERS BY GROUP
+router.get('/groups/:jid/members', async (req, res) => {
+    try {
+        const { jid } = req.params;
+        const result = await db.query(`
+            SELECT m.member_id as "memberId", m.whatsapp_id as "whatsappMemberId", m.display_name as "displayName", m.phone_number as "phoneNumber", m.company_name as "companyName", m.job_title as "jobTitle", m.is_eo_member as "isEoMember", m.eo_chapter as "eoChapter", m.is_ypo_member as "isYpoMember", m.ypo_chapter as "ypoChapter", m.is_direct as "isDirect", m.monitoring_enabled as "monitoringEnabled", m.chat_profile_summary as "chatProfileSummary", m.expertise_tags as "expertiseTags", m.linkedin_url as "linkedinUrl", m.linkedin_birthday as "linkedinBirthday", m.last_active_at as "lastActiveAt", m.total_messages_sent as "totalMessagesSent"
+            FROM crm.wa_members m
+            JOIN crm.wa_groupmembers gm ON m.member_id = gm.member_id
+            JOIN crm.wa_groups g ON gm.group_id = g.group_id
+            WHERE g.whatsapp_group_id = $1
+            ORDER BY m.last_active_at DESC NULLS LAST
+        `, [jid]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching group members:', error);
+        res.status(500).json({ error: 'Failed to fetch group members' });
+    }
+});
+
 // GET MEMBERS
 router.get('/members', async (req, res) => {
     try {
@@ -60,6 +79,48 @@ router.get('/inbox/high-value', async (req, res) => {
       `);
         res.json(result.rows);
     } catch (error) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// GET MESSAGES BY GROUP (History)
+router.get('/groups/:jid/messages', async (req, res) => {
+    try {
+        const { jid } = req.params;
+        const result = await db.query(`
+            SELECT m.message_id as "id", m.message_content as "body", m.created_at_ts as "timestamp", 
+                   mem.display_name as "sender_name", mem.member_id as "sender_id", mem.whatsapp_id as "sender_jid"
+            FROM crm.wa_messages m
+            JOIN crm.wa_groups g ON m.group_id = g.group_id
+            LEFT JOIN crm.wa_members mem ON m.sender_id = mem.member_id
+            WHERE g.whatsapp_group_id = $1
+            ORDER BY m.created_at DESC
+            LIMIT 50
+        `, [jid]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching messages:', error);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
+// UPSERT GROUP SETTINGS
+router.post('/groups/upsert', async (req, res) => {
+    try {
+        const { jid, name, memberCount, monitoringEnabled, instanceId } = req.body;
+        await db.query(`
+            INSERT INTO crm.wa_groups (whatsapp_group_id, group_name, participant_count, monitoring_enabled, instance_id, is_active)
+            VALUES ($1, $2, $3, $4, $5, true)
+            ON CONFLICT (whatsapp_group_id) 
+            DO UPDATE SET 
+                monitoring_enabled = EXCLUDED.monitoring_enabled,
+                participant_count = EXCLUDED.participant_count,
+                group_name = EXCLUDED.group_name,
+                updated_at = NOW()
+        `, [jid, name, memberCount, monitoringEnabled, instanceId]);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error upserting group:', error);
+        res.status(500).json({ error: 'Failed' });
+    }
 });
 
 module.exports = router;
