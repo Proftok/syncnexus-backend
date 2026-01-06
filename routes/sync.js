@@ -240,4 +240,144 @@ router.post('/full-sync', async (req, res) => {
     }
 });
 
+// 4. SYNC MESSAGES (Historical Chat Sync)
+router.post('/messages', async (req, res) => {
+  try {
+    const { groupJid, instanceName, limit } = req.body;
+    const finalInstanceName = instanceName || process.env.EVOLUTION_INSTANCE_NAME || 'sa-personal';
+    const messageLimit = limit || 100;
+
+    console.log(`💬 Starting message sync for ${groupJid} (limit: ${messageLimit})...`);
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL;
+    const apiKey = process.env.EVOLUTION_API_KEY;
+
+    if (!evolutionUrl || !apiKey) throw new Error('Missing Evolution Config');
+
+    // Verify group exists in database
+    const groupRes = await db.query(
+      'SELECT group_id FROM crm.wa_groups WHERE whatsapp_group_id = $1',
+      [groupJid]
+    );
+
+    if (groupRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Group not found in database. Sync groups first.' });
+    }
+
+    const groupId = groupRes.rows[0].group_id;
+
+    // Fetch messages from Evolution API
+    const response = await axios.get(
+      `${evolutionUrl}/chat/findMessages/${finalInstanceName}`,
+      {
+        headers: { 'apikey': apiKey },
+        params: {
+          remoteJid: groupJid,
+          limit: messageLimit
+        }
+      }
+    );
+
+    const messages = response.data?.messages || response.data || [];
+    
+    if (!Array.isArray(messages)) {
+      console.log('API Response:', JSON.stringify(response.data, null, 2));
+      throw new Error('Invalid response format from Evolution API');
+    }
+
+    console.log(`📦 Fetched ${messages.length} messages from Evolution API`);
+
+    let savedCount = 0;
+    let skippedCount = 0;
+
+    for (const msg of messages) {
+      try {
+        const key = msg.key || {};
+        const messageId = key.id;
+        const isFromMe = key.fromMe;
+        const senderJid = isFromMe ? 'ME' : (key.participant || key.remoteJid);
+        const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
+
+        // Extract message body
+        let body = '';
+        if (msg.message?.conversation) {
+          body = msg.message.conversation;
+        } else if (msg.message?.extendedTextMessage?.text) {
+          body = msg.message.extendedTextMessage.text;
+        } else if (msg.message?.imageMessage?.caption) {
+          body = `[Image] ${msg.message.imageMessage.caption}`;
+        } else if (msg.message?.videoMessage?.caption) {
+          body = `[Video] ${msg.message.videoMessage.caption}`;
+        } else {
+          body = '[Media/System Message]';
+        }
+
+        // Skip empty or system messages
+        if (!body || body.length < 2) {
+          skippedCount++;
+          continue;
+        }
+
+        // Ensure sender exists in members table
+        await db.query(`
+          INSERT INTO crm.wa_members (whatsapp_id, display_name)
+          VALUES ($1, $2)
+          ON CONFLICT (whatsapp_id) DO NOTHING
+        `, [senderJid, msg.pushName || 'Unknown']);
+
+        // Get member_id
+        const memberRes = await db.query(
+          'SELECT member_id FROM crm.wa_members WHERE whatsapp_id = $1',
+          [senderJid]
+        );
+
+        if (memberRes.rows.length === 0) {
+          skippedCount++;
+          continue;
+        }
+
+        const memberId = memberRes.rows[0].member_id;
+
+        // Insert message
+        await db.query(`
+          INSERT INTO crm.wa_messages (
+            whatsapp_message_id, group_id, sender_id, message_content, 
+            created_at, has_media, media_type, is_from_me
+          ) VALUES ($1, $2, $3, $4, TO_TIMESTAMP($5), $6, $7, $8)
+          ON CONFLICT (whatsapp_message_id) DO NOTHING
+        `, [
+          messageId,
+          groupId,
+          memberId,
+          body,
+          timestamp,
+          msg.message?.imageMessage || msg.message?.videoMessage ? true : false,
+          msg.message?.imageMessage ? 'image' : (msg.message?.videoMessage ? 'video' : 'text'),
+          isFromMe
+        ]);
+
+        savedCount++;
+
+      } catch (msgError) {
+        console.error('Failed to save message:', msgError.message);
+        skippedCount++;
+      }
+    }
+
+    console.log(`✅ Message sync complete: ${savedCount} saved, ${skippedCount} skipped`);
+
+    res.json({
+      success: true,
+      totalFetched: messages.length,
+      saved: savedCount,
+      skipped: skippedCount
+    });
+
+  } catch (error) {
+    console.error('❌ Message sync error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 module.exports = router;
